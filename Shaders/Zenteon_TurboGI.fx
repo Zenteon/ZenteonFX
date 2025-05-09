@@ -141,9 +141,9 @@ namespace TurboGI3 {
 	float3 Albedont(float2 xy)
 	{
 		float3 c = GetBackBuffer(xy + 0.5 / RES);
-		float cl = dot(c, 0.3);//GetLuminance(c);
+		float cl = dot(c, 0.333334);//GetLuminance(c);
 		float g = abs(ddx_fine(cl)) + abs(ddy_fine(cl));
-		c = 0.95 * c / (0.05 + cl);
+		c = 0.95 * c / (0.1 + cl);
 		c*=c;
 		
 		
@@ -187,10 +187,12 @@ namespace TurboGI3 {
 		
 		float3 input = saturate(GetBackBuffer(xy));
 		float inLum = GetLuminance(input);
-		//float3 c = max(input / inLum, 0.0);
-		//input = lerp(input, inLum, 0.5 * inLum*inLum*inLum*inLum);
-		float3 GI = Albedont(xy) * IReinJ(tex2D(GISam, xy).rgb, HDR);
-		lum = float4(IReinJ(input, HDR) + GI, 1.0);
+		float3 albedo = Albedont(xy);
+		float3 GI = 0.5 * albedo * IReinJ(tex2D(GISam, xy).rgb, HDR);
+		
+		input = IReinJ(input, HDR);
+		input = max(0.0, input - 0.1 * albedo);
+		lum = float4(input + GI, 1.0);
 		if(dep == 1.0) lum = float4(0.0.xxx, 1.0);
 	}
 	
@@ -254,38 +256,33 @@ namespace TurboGI3 {
 	   	
 	   	 
 	   	 
-			//vec /= RES;
+			vec /= normalize(RES);
 			float2 maxDot = float2(sin(N) * nMul, -1.0);
 			float2 maxAtt;
 			
 			for(int i; i < STEPS; i++) 
 			{
 				
-				
-				const float nexp = 1.3;
 				float ji = (jit + i) / (STEPS);	
 				float noff = ji*ji;
 				float nint = noff*noff;
 				
 				float lod = floor(5.0 * ji*ji);
 				
-				float2 sampXY = xy + vec * 0.5 * RAY_LENGTH * noff;
+				float2 sampXY = xy + vec * 0.3334 * RAY_LENGTH * noff;
 				if( any( abs(sampXY - 0.5) > 0.5 ) ) break;
 
 				
 				float  sampD = tex2Dlod(DepDiv, float4(sampXY, 0, lod)).x + 0.0002;
-				float3 sampN = 2f * tex2Dlod(NorDiv, float4(sampXY, 0, lod)).xyz - 1f;
+				float3 sampN = (2f * tex2Dlod(NorDiv, float4(sampXY, 0, lod)).xyz - 1f);
 				float3 sampL = tex2Dlod(LumDiv, float4(sampXY, 0, lod)).rgb;
 				
 				float3 posR  = GetEyePos(sampXY, sampD);
 				float3 sV = normalize(posR - posV);
-				//I got supremely lazy here
-				//float cDot = dot(vieV, sV));
 				float vDot = dot(vieV, sV);
 				
 				float att = rcp(1.0 + 0.1 * dot(posR.z - posV.z, posR.z - posV.z) / attm);
-				//cDot = 2.0 * (0.5 + 0.5 * cDot) * att - 1.0;
-				//att *= !any(abs(sampXY - 0.5) > 0.5);
+				
 				float sh;
 				[flatten]
 				if(vDot > maxDot.x) {
@@ -295,7 +292,7 @@ namespace TurboGI3 {
 				[flatten]
 				if(vDot >= maxDot.y) {
 					maxDot.y = lerp(maxDot.y, vDot, 0.4 + 0.5 * att);
-					sh = abs(vDot - maxDot.x);
+					sh = vDot - maxDot.x;
 				}
 				
 				float  trns  = max(CalcTransfer(posV, prjNN, posR, sampN, 1.0, 0.1, 0.0), 0.0);
