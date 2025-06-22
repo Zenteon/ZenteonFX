@@ -13,7 +13,7 @@
 	
 	
 	======================================================================	
-	Zenteon: Sharpen v0.1 - Authored by Daniel Oren-Ibarra "Zenteon"
+	Zenteon: TurboGI v0.1 - Authored by Daniel Oren-Ibarra
 	
 	Discord: https://discord.gg/PpbcqJJs6h
 	Patreon: https://patreon.com/Zenteon
@@ -24,8 +24,7 @@
 #include "ReShade.fxh"
 #include "ZenteonCommon.fxh"
 
-uniform int FRAME_COUNT <
-	source = "framecount";>;
+uniform int FRAME_COUNT <	source = "framecount";>;
 
 uniform float INTENSITY <
 	ui_type = "drag";
@@ -46,12 +45,20 @@ uniform float RAY_LENGTH <
 	ui_max = 1.0;
 	ui_type = "drag";
 	ui_label = "Ray Length";
-> = 1.0;
+> = 0.5;
+
+uniform float FADEOUT <
+	ui_type = "drag";
+	ui_label = "Fadeout";
+	ui_min = 0.0;
+	ui_max = 1.0;
+> = 0.5;
 
 uniform int DEBUG <
 	ui_type = "combo";
 	ui_items = "None\0GI\0";
 > = 0;
+
 
 uniform bool MV_COMP <
 	ui_label = "Zenteon: Motion Compatibility";
@@ -64,11 +71,14 @@ sampler MVSam0 { Texture = texMotionVectors; };
 texture tDOC { DIVRES(1); Format = R8; };
 sampler sDOC { Texture = tDOC; };
 
-namespace ZenTGI {
+namespace ZenTGI_Temp2 {
 	
 	//=======================================================================================
 	//Textures/Samplers
 	//=======================================================================================
+	
+	texture tVN < source = "ZenteonBN.png"; > { Width = 512; Height = 512; Format = RGBA8; };
+	sampler sVN { Texture = tVN; FILTER(POINT); WRAPMODE(WRAP); }; 
 	
 	texture2D tDep1 { DIVRES(2); Format = R16; };
 	sampler2D sDep1 { Texture = tDep1; };
@@ -121,7 +131,7 @@ namespace ZenTGI {
 		texcoord.y /= RESHADE_DEPTH_INPUT_Y_SCALE;
 		#if RESHADE_DEPTH_INPUT_X_PIXEL_OFFSET
 		texcoord.x -= RESHADE_DEPTH_INPUT_X_PIXEL_OFFSET * BUFFER_RCP_WIDTH;
-		#else // Do not check RESHADE_DEPTH_INPUT_X_OFFSET, since it may be a decimal number, which the preprocessor cannot handle
+		#else
 		texcoord.x -= RESHADE_DEPTH_INPUT_X_OFFSET / 2.000000001;
 		#endif
 		#if RESHADE_DEPTH_INPUT_Y_PIXEL_OFFSET
@@ -144,36 +154,14 @@ namespace ZenTGI {
 		return depth;
 	}
 	
-	float Bayer(uint2 p, uint level) //Thanks Marty
-	{
-		//p += uint2(FRAME_COUNT, 0.2 * FRAME_COUNT);
-	    p = (p ^ (p << 8u)) & 0x00ff00ffu;
-	    p = (p ^ (p << 4u)) & 0x0f0f0f0fu;
-		p = (p ^ (p << 2u)) & 0x33333333u;
-		p = (p ^ (p << 1u)) & 0x55555555u;     
-		
-		uint i = (p.x ^ p.y) | (p.x << 1);     
-		i = reversebits(i); 
-		i >>= 32 - level * 2;  
-		return float(i) / float(1 << (2 * level));
-	}
-	
-	float2 GetNoise(int2 vpos, float z)
-	{
-		int size = 8;
-		vpos.x = 64 * Bayer(vpos, 3u);
-		vpos.x += 11 * z;
-		vpos %= size*size;
-		
-		return float2(vpos.x / 64.0, frac(vpos.x / 1.6180339887498948482) );
-	}
 	
 	float GRnoise2(float2 xy)
 	{  
 	  const float2 igr2 = float2(0.754877666, 0.56984029); 
 	  xy *= igr2;
 	  float n = frac(xy.x + xy.y);
-	  return n;// < 0.5 ? 2.0 * n : 2.0 - 2.0 * n;
+	  //return tex2Dfetch(sVN, xy % 512).x;
+	  return n < 0.5 ? 2.0 * n : 2.0 - 2.0 * n;
 	}
 	
 	float GRnoise3(float2 xy)
@@ -241,14 +229,13 @@ namespace ZenTGI {
 		float3 c = GetBackBuffer(xy);
 		float3 col = c * c / (GetLuminance(c*c) + 0.001);
 		
-		c = lerp(IReinJ(c, HDR), max(-c / (c - 1.05), 0.0), 0.2);
+		c = lerp(IReinJ(c, HDR), max(-c / (c - 1.05), 0.0), 0.0);
 		
 		return float4(GI + c, 1.0);
 	}
 	
 	float CopyDepPS(float4 vpos : SV_Position, float2 xy : TexCoord) : SV_Target
 	{
-		if(MV_COMP) return 0.0;
 		return tex2D(sDep2, xy).r;
 	}
 	
@@ -261,15 +248,15 @@ namespace ZenTGI {
 	//GI
 	//=======================================================================================
 	
-	#define FRAME_MOD (IGNSCROLL * (FRAME_COUNT % 32 + 1))
+	#define FRAME_MOD (32.0*IGNSCROLL * (FRAME_COUNT % 64 + 1))
 	#define STEPS 12
 	
 	float4 CalcGIPS(PS_INPUTS) : SV_Target
 	{
 		//xy = 4.0 * floor(xy * RES * 0.33334) / RES;
-		float3 surfN = 2f * tex2Dlod(sNormal, float4(xy,0,2)).xyz - 1f;
-		const float lr = RAY_LENGTH * 0.0625 * 0.25 * length(RES);
-		float cenD = tex2D(sDep2, xy).x;
+		float3 surfN = 2f * tex2Dlod(sNormal, float4(xy,0,2)).xyz - 1f;//GetNormal(xy);//
+		const float lr = RAY_LENGTH;// * length(RES);///0.0625 * 0.25 * 
+		float cenD = tex2D(sDep2, xy).x;//
 		float3 posV  = GetEyePos(xy, cenD);//NorEyePos(xy);
 		float3 vieV  = -normalize(posV);
 		if(posV.z == FARPLANE) discard;	
@@ -284,6 +271,7 @@ namespace ZenTGI {
 		float2 minA;
 		
 		float attm = 1.0 + 0.05 * posV.z;
+		float valid = 0.0;
 		for(int ii; ii < RAYS; ii++)
 		{
 			dir += 6.28 / RAYS;
@@ -299,7 +287,7 @@ namespace ZenTGI {
 	   	
 	   	 
 			vec /= normalize(RES);
-			float2 maxDot = float2(sin(N) * nMul, -1.0);
+			float2 maxDot = sin(N) * nMul;
 			float2 maxAtt;
 			
 			for(int i; i < STEPS; i++) 
@@ -309,13 +297,13 @@ namespace ZenTGI {
 				float noff = ji*ji;
 				float nint = noff;//would normaly be ^2, but compensating for the agressive mipmaps
 				
-				float lod = floor(6.0 * ji);
+				float lod = floor(7.0 * ji);
 				
-				float2 sampXY = xy + vec * 0.5 * RAY_LENGTH * noff;
+				float2 sampXY = xy + vec * RAY_LENGTH * noff;
 				if( any( abs(sampXY - 0.5) > 0.5 ) ) break;
 
-				
-				float  sampD = tex2Dlod(sDep2, float4(sampXY, 0, lod)).x + 0.0002;
+				//GetDepth(sampXY);//
+				float  sampD = tex2Dlod(sDep2, float4(sampXY, 0, lod + 0)).x + 0.0002;
 				float3 sampN = (2f * tex2Dlod(sNormal, float4(sampXY, 0, lod + 2)).xyz - 1f);
 				float3 sampL = tex2Dlod(sRadiance, float4(sampXY, 0, lod + 1)).rgb;
 				
@@ -323,27 +311,28 @@ namespace ZenTGI {
 				float3 sV = normalize(posR - posV);
 				float vDot = dot(vieV, sV);
 				
-				float att = rcp(1.0 + 0.5 * dot(posR.z - posV.z, posR.z - posV.z) / attm);
-				float att2 = rcp(1.0 + 0.1 * dot(posR - posV, posR - posV) / attm);
+				float att = rcp(1.0 + 0.1 * dot(posR.z - posV.z, posR.z - posV.z) / attm);
+				float att2 = rcp(1.0 + 0.05 * dot(posR - posV, posR - posV) / attm);
 				
-				float sh = 0.02;
+				float sh = 0.0;
 				[flatten]
 				if(vDot > maxDot.x) {
-					maxDot.x = lerp(maxDot.x, vDot, att2 * 1.0);
+					maxDot.x = lerp(maxDot.x, vDot, att2 * 0.7);
 				}
 				
 				[flatten]
 				if(vDot >= maxDot.y) {
-					maxDot.y = lerp(maxDot.y, vDot, 0.4 + 0.5 * att);
-					sh = vDot - maxDot.x;
+					sh = saturate(vDot-maxDot.y);
+					maxDot.y = lerp(maxDot.y, vDot, 0.7 * att);
+					//acos(maxDot.y) - acos(vDot);
 				}
 				
-				float  trns  = max(CalcTransfer(posV, surfN, posR, sampN, 1.0, 0.1, 0.0), 0.0);
-				trns *= nint;
-				trns *= dot(sV, surfN) > 0.03;
+				float  trns  = CalcTransfer(posV, surfN, posR, sampN, 1.0, 0.000001, 0.0);
+				trns /= abs(dot(sampN, normalize(posR) )) + 0.0001;
+				trns *= 9.0 * noff*noff;
 				acc += sh * sampL * trns;
 			}
-			
+			valid = max(maxDot.x != sin(N) * nMul,valid);
 			maxDot.x = acos(maxDot.x);
 			maxDot.x *= -nMul.x;
 			
@@ -352,7 +341,7 @@ namespace ZenTGI {
 		}
 		
 		float2 MV = tex2D(MVSam0, xy).xy;
-		float4 cur = float4(max(lr * acc / (STEPS * RAYS), 0.0), 2.0 * aoAcc / RAYS);
+		float4 cur = float4(max(RAY_LENGTH * RAY_LENGTH * acc / (RAYS), 0.0), 2.0 * aoAcc / RAYS);
 		float4 pre = tex2D(sPGI, xy + MV);
 		
 		float DEG;
@@ -362,11 +351,11 @@ namespace ZenTGI {
 		}
 		else {
 		
-			float CD = GetDepth(xy);
+			float CD = cenD;
 			float PD = tex2D(sPDep, xy + MV).r;
 			DEG = min(saturate(pow(abs(PD / CD), 10.0) + 0.0), saturate(pow(abs(CD / PD), 5.0) + 0.0));
 		}
-		
+		//float4(ReinJ(cur.rgb, HDR), 1.0);//
 		return lerp(cur, pre, DEG * (0.8 + 0.1 * MV_COMP) );
 		
 	}
@@ -379,10 +368,16 @@ namespace ZenTGI {
 	{
 		return float4(0.282095, 0.488603f * vec.y,  0.488603f * vec.z, 0.488603f * vec.x);
 	}
+	//e^-x
+	float fastExpN(float x)
+	{
+		return rcp( x + (x*x + 1.0)) + exp2(-32);
+	}
+	
 	#define RAD 2
 	void Denoise0PS(PS_INPUTS, out float4 shLum : SV_Target0, out float4 shCol : SV_Target1)
 	{
-		float2 its = 6.0 * rcp(RES);
+		float2 its = 4.0 * rcp(RES);
 		float cenD = tex2D(sDep2, xy).x;
 		float3 cenN = 2.0 * tex2Dlod(sNormal, float4(xy,0,2)).xyz - 1.0;
 		float accw = 0.0;
@@ -397,7 +392,7 @@ namespace ZenTGI {
 			float samL = GetLuminance(samC.rgb);
 			float w = saturate(dot(cenN, samN));
 			w *= w;
-			w *= exp( -40.0 * abs(cenD - samD) / (cenD + 0.001) );
+			w *= fastExpN( 50.0 * abs(cenD - samD) / (cenD + 0.001) );
 			
 			shLum += w * GetSH(samN) * samL;
 			shCol += w * samC / float4(samL + 0.0001.xxx, 1.0);
@@ -416,15 +411,14 @@ namespace ZenTGI {
 	{
 		float2 its = 4.0 * rcp(RES);
 		float cenD = tex2D(sDep1, xy).x;
-		//float3 cenN = 2.0 * tex2Dlod(sNormal, float4(xy,0,2)).xyz - 1.0;
 		float2 accw = 0.0;
-		for(int i = 0; i < 5; i++)//for(int i = -1; i <= 1; i++) for(int j = -1; j <= 1; j++)
+		for(int i = 0; i < 5; i++)
 		{
 			float2 nxy = xy + its * ioff[i];//float2(i,j);
 			float4 samSH = tex2Dlod(sSH0, float4(nxy,0,0));
 			float4 samC = tex2Dlod(sCol0, float4(nxy,0,0));
 			float samD = tex2Dlod(sDep2, float4(nxy,0,0)).x;
-			float w = exp( -40.0 * abs(cenD - samD) / (cenD + 0.0001) );
+			float w = fastExpN( 100.0 * abs(cenD - samD) / (cenD + 0.0001) );
 			
 			shLum += samSH * w;
 			shCol += samC * w;
@@ -439,7 +433,6 @@ namespace ZenTGI {
 	{
 		float2 its = 2.0 * rcp(RES);
 		float cenD = GetDepth(xy);
-		//float3 cenN = 2.0 * tex2Dlod(sNormal, float4(xy,0,2)).xyz - 1.0;
 		float2 accw = 0.0;
 		for(int i = 0; i < 5; i++)
 		{
@@ -447,7 +440,7 @@ namespace ZenTGI {
 			float4 samSH = tex2Dlod(sSH1, float4(nxy,0,0));
 			float4 samC = tex2Dlod(sCol1, float4(nxy,0,0));
 			float samD = tex2Dlod(sDep1, float4(nxy,0,0)).x;
-			float w = exp( -50.0 * abs(cenD - samD) / (cenD + 0.0001) );
+			float w = fastExpN( 100.0 * abs(cenD - samD) / (cenD + 0.0001) );
 			
 			shLum += samSH * w;
 			shCol += samC * w;
@@ -468,41 +461,50 @@ namespace ZenTGI {
 	}
 	
 	
+	float CalcFog(float d, float den)
+	{
+		float2 se = float2(0.0, 0.001 + 0.999 * FADEOUT);
+		se.y = max(se.y, se.x + 0.001);
+		d = saturate(1.0 / (se.y) * d - se.x);
+		float f = 1.0 - 1.0 / exp(pow(d * den, 2.0));
+		
+		return saturate(f);
+	}
+	
 	float3 BlendPS(PS_INPUTS) : SV_Target
 	{
 		float4 GI = tex2D(sGI0, xy);
 		float3 normal = 2f * tex2Dlod(sNormal, float4(xy,0,0)).xyz - 1f;
 		
 		float4 Nbasis = GetSH(normal);
-		float4 GIbasis = tex2D(sSH2, xy);
-		GIbasis = ClampSH(GIbasis);
+		float4 GIbasis = tex2D(sSH2, xy );
+		//GIbasis = ClampSH(GIbasis);
 		
-		float4 GICol = tex2D(sCol2, xy);
+		float4 GICol = tex2D(sCol2, xy );
 		float rad = dot(float4(3.14159, 2.59439.xxx) * GIbasis, float4(3.14159, 2.59439.xxx) * Nbasis);
+		rad = max(rad, 0.0);
 		
 		float3 c = IReinJ(GetBackBuffer(xy), HDR);
 		float3 alb = Albedont(xy);
 		if(DEBUG) {
-			c = 0.05;
+			c = 0.02;
 			alb = 1.0;
 		}
-		float dither = (GRnoise3(vpos.xy) - 0.5) * exp2(-8);
-		//return ReinJ(0.05 * GICol.a + GICol.a * GICol.rgb * rad, HDR);		
+		float dither = (GRnoise3(vpos.xy) - 0.5) * exp2(-8);	
 		return dither + ReinJ(
-			lerp(1.0, GICol.a, AO_INTENSITY) * c +
-			INTENSITY * alb * GICol.a * GICol.rgb * rad,
+			lerp(c, 
+			lerp(1.0, GICol.a, AO_INTENSITY) * c + INTENSITY * alb * GICol.a * GICol.rgb * rad, 1.0 - CalcFog(GetDepth(xy), 2.0) ),
 		 HDR);
-		//return pow(GICol.a, rcp(2.2));
-		//return GetBackBuffer(xy);
+		 
 	}
 	
 	technique ZenTurboGI <
 		ui_label = "Zenteon: TurboGI 3";
 		    ui_tooltip =        
-		        "								  	 Zenteon - Sharpen           \n"
+		        "								  	 Zenteon - TurboGI           \n"
 		        "\n================================================================================================="
 		        "\n"
-		        "\nA dead simple sharpening shader that maximizes detail and minimizes halos"
+		        "\nA very fast global illumination shader meant targeting older mobile GPUs"
 		        "\n"
 		        "\n=================================================================================================";
 		>	
