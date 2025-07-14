@@ -45,7 +45,7 @@ namespace zfw {
 	texture2D tLowNormal { DIVRES(4); Format = RG8; MipLevels = 7; };
 	sampler2D sLowNormal { Texture = tLowNormal; MagFilter = POINT; };
 	texture2D tLowDepth { DIVRES(4); Format = R16; MipLevels = 7; };
-	sampler2D sLowDepth { Texture = tLowDepth; };
+	sampler2D sLowDepth { Texture = tLowDepth; FILTER(POINT); };
 	
 	//texture2D tTest < source = "TestImage.jpg"; > { Width = 4032; Height = 3024; Format = RGBA8; };
 	//sampler2D sTest { Texture = tTest; };	
@@ -64,19 +64,19 @@ float GetDepth(float2 xy)
 }
 
 
-#define FOV (1.0 * 0.0174533 * 70.0)
+#define FOV (1.0 * 0.0174533 * 90.0)
 #define fl rcp(tan(0.5 * FOV))
 
 float3 GetEyePos(float2 xy, float z)
 {
-	float3 m = float3(fl / IASPECT_RATIO, 1.0);
+	float3 m = float3(fl / IASPECT_RATIO, (FARPLANE / (FARPLANE - 1.0)) );
 	float3 xyz = float3(2*xy-1,1.0);
 	return (z * FARPLANE + 1.0) * xyz*m;
 }
 
 float3 GetEyePos(float3 xyz)
 {
-	float3 m = float3(fl / IASPECT_RATIO, 1.0);
+	float3 m = float3(fl / IASPECT_RATIO, (FARPLANE / (FARPLANE - 1.0)));
 	float z = xyz.z;
 	xyz = float3(2*xyz.xy-1,1.0);
 	return (z * FARPLANE + 1.0) * xyz*m;
@@ -85,16 +85,16 @@ float3 GetEyePos(float3 xyz)
 float3 NorEyePos(float2 xy)
 {
 	float z = GetDepth(xy);
-	float3 m = float3(fl / IASPECT_RATIO, 1.0);
+	float3 m = float3(fl / IASPECT_RATIO, (FARPLANE / (FARPLANE - 1.0)));
 	float3 xyz = float3(2*xy-1,1.0);
 	return (z * FARPLANE + 1.0) * xyz*m;
 }
 
 float3 GetScreenPos(float3 xyz)
 {
-	float3 m = float3(fl / IASPECT_RATIO, 1.0);
-	xyz /= m * xyz.z;
-	return 0.5 + 0.5 * xyz;
+	float3 m = float3(fl / IASPECT_RATIO, (FARPLANE / (FARPLANE - 1.0)));
+	xyz.xy /= m.xy * xyz.z;
+	return float3(0.5 + 0.5 * xyz.xy, (xyz.z - 1.0) / FARPLANE);
 }
 
 
@@ -236,7 +236,10 @@ float CalcTransfer(float3 pos0, float3 nor0, float3 pos1, float3 nor1, float dis
 {
 	float lumMult = dot(pos1, pos1) + 0.001;//length(pos1) / (1.0 + disDiv) + 1.0; lumMult *= lumMult;
 	float dist = rcp(att + dot(pos1-pos0,pos1-pos0));//distance(pos0, pos1) / (1.0 + disDiv) + 1.0; dist = rcp(dist*dist);
-	float lamb = CalcDiffuse(pos0, nor0, pos1, nor1, backface);
+	//float lamb = CalcDiffuse(pos0, nor0, pos1, nor1, backface);
+	float3 nv = normalize(pos1 - pos0);
+	float lamb = saturate(dot(nor0, nv)) * (saturate(dot(nor1, -nv)) );
+	
 	return max(lamb * lumMult * dist, 0.000);
 }	
 
@@ -246,9 +249,9 @@ float CalcSpecular(float3 pos0, float3 refl0, float3 pos1, float3 nor1, float di
 	float diff0 = pow(saturate(dot(refl0, normalize(pos1 - pos0)) - 0.1), power);
 	float diff1 = saturate((dot(nor1, normalize(pos0 - pos1)) - 0.1));
 	
-	float lumMult = pow(length(pos1) / (1.0 + disDiv) , 2.0);
-	float eyeMult = rcp( pow(length(pos0) / (1.0 + disDiv) , 2.0 ));
-	float dist = rcp( pow(att + distance(pos0, pos1) / disDiv, 2.0) );
+	float lumMult = dot(pos1,pos1);//pow(length(pos1) / (1.0 + disDiv) , 2.0);
+	float eyeMult = rcp(dot(pos0,pos0)+1.0);//rcp( pow(length(pos0) / (1.0 + disDiv) , 2.0 ));
+	float dist = rcp(dot(pos0-pos1,pos0-pos1)+0.00001);//rcp( pow(att + distance(pos0, pos1) / disDiv, 2.0) );
 	float trns = diff0 * diff1;
 	return max(power * trns * eyeMult * lumMult * dist, 0.00);
 }
