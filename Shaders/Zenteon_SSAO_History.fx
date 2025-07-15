@@ -243,7 +243,7 @@ namespace SSAO_HISTORY {
 	
 	float BFAO(float2 xy, float3 verPos, float3 viewV, float3 n, float2 noise)
 	{
-		float AOacc;
+		float2 AOacc;
 		float acc;
 		for(int i = 0; i < SLICES; i++)
 		{
@@ -268,12 +268,12 @@ namespace SSAO_HISTORY {
 			float2 ta = float2(-1,1) * (float2(hn.x - 1.5707,1.5707-hn.y) + N);
 			
 			#if(AO_METHOD == 2)
-				AOacc += length(prjN) * GTAOContr(hn, N ); //GTAO
+				AOacc += float2(GTAO_TYPE ? (1.0 - dot( h.xy,0.5)) : length(prjN) * GTAOContr(hn, N ), 1.0); //GTAO
 			#else
-				AOacc += (1.0 - countbits(BITFIELD) / 32.0); //GTAO with bitmasks
+				AOacc += length(prjN) * float2((1.0 - countbits(BITFIELD) / 32.0), 1.0); //GTAO with bitmasks
 			#endif
 		}
-		return saturate(AOacc / SLICES);
+		return saturate(AOacc.x / AOacc.y);
 	}
 	
 	float3 mindV(float3 c, float3 a, float3 b)
