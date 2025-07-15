@@ -270,6 +270,7 @@ namespace SSAO_HISTORY {
 			#if(AO_METHOD == 2)
 				AOacc += float2(GTAO_TYPE ? (1.0 - dot( h.xy,0.5)) : length(prjN) * GTAOContr(hn, N ), 1.0); //GTAO
 			#else
+				//Thanks Marty for pointing out the slice weighing
 				AOacc += length(prjN) * float2((1.0 - countbits(BITFIELD) / 32.0), 1.0); //GTAO with bitmasks
 			#endif
 		}
