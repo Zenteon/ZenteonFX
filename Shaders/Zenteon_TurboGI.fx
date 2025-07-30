@@ -504,7 +504,7 @@ namespace ZenTGI_Temp2 {
 		        "								  	 Zenteon - TurboGI           \n"
 		        "\n================================================================================================="
 		        "\n"
-		        "\nA very fast global illumination shader meant targeting older mobile GPUs"
+		        "\nA very fast global illumination shader targeting older mobile GPUs"
 		        "\n"
 		        "\n=================================================================================================";
 		>	
