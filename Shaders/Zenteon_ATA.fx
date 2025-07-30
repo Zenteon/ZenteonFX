@@ -13,7 +13,7 @@
 	
 	
 	======================================================================	
-	Zenteon: ATA v0.1 - Authored by Daniel Oren-Ibarra "Zenteon"
+	Zenteon: ATA v0.2 - Authored by Daniel Oren-Ibarra "Zenteon"
 	
 	Discord: https://discord.gg/PpbcqJJs6h
 	Patreon: https://patreon.com/Zenteon
@@ -51,6 +51,11 @@ uniform float FILTER_STRENGTH <
 	ui_type = "slider";
 > = 0.8;
 
+uniform int WEIGHT_MODE <
+	ui_type = "combo";
+	ui_items = "SSD\0Exp (configurable weight)\0";
+	ui_label = "Weight Type";
+> = 1;
 #define NLM_WEIGHT_COEFF ( 2000.0 * (1.0 - 0.95 * FILTER_STRENGTH) * (1.0 - 0.95 * FILTER_STRENGTH) )
 
 uniform float TAA_LERP_VALUE <
@@ -75,10 +80,10 @@ namespace ZenTDF {
 	//=======================================================================================
 	
 	texture2D tCur { DIVRES(1); Format = RGB10A2; };
-	sampler2D sCur { Texture = tCur; FILTER(POINT); };
+	sampler2D sCur { Texture = tCur; };
 	
 	texture2D tPre { DIVRES(1); Format = RGB10A2; };
-	sampler2D sPre { Texture = tPre; FILTER(POINT); };
+	sampler2D sPre { Texture = tPre; };
 	
 	//=======================================================================================
 	//Functions
@@ -86,7 +91,7 @@ namespace ZenTDF {
 	
 	float fastExpN(float x)
 	{
-		return rcp( x + (x*x + 1.0)) + 0.0;//1e-19;
+		return rcp( x + (x*x + 1.0)) + 1e-19;
 	}
 	
 	void GetPatch( sampler2D tex, float2 pos, inout float3 Patch[9] )
@@ -105,14 +110,23 @@ namespace ZenTDF {
 		for(int i = 0; i < 9; i++)
 		{
 			float3 ti = P0[i] - P1[i];
-			//reduces flicker on high contrast edges
-			float ni =  max( max( max(P0[i].x, P1[i].x),
-						max(P0[i].y, P1[i].y) ),
-						max(P0[i].z, P1[i].z) );
-			 //dot(P0[i] + P1[i], rcp(6.0) );
-			err += dot(ti, ti) / (ni * ni + 0.0001);
+			err += dot(ti, ti);
 		}
+		if(WEIGHT_MODE == 0) return rcp(wm * err + 1e-18); //  I like this better, but less configurable
 		return fastExpN( 0.1111111 * wm * err);
+		//TODO replace with explicit optimization of the minimum
+	}
+	
+	float PatchLoss( float3 P0[9], float3 P1[9])
+	{
+		float err;
+		for(int i = 0; i < 9; i++)
+		{
+			float3 ti = P0[i] - P1[i];
+			
+			err += dot(ti, ti);
+		}
+		return err / 9.0;
 	}
 	
 	//=======================================================================================
@@ -120,8 +134,7 @@ namespace ZenTDF {
 	//=======================================================================================
 	
 	float4 CurPS(PS_INPUTS) : SV_Target
-	{
-	
+	{	
 	#if(USE_FRAMEWORK_MOTION)
 		float2 MVi = RES * GetVelocity(xy).xy;
 	#else
@@ -166,7 +179,6 @@ namespace ZenTDF {
 		acn = all( abs(wm.xy - float2(-1, 1)) < 0.001 ) ? S[0]+S[1]+S[3]+S[4] : acn;
 		acn = all( abs(wm.xy - float2(-1,-1)) < 0.001 ) ? S[3]+S[4]+S[6]+S[7] : acn;
 		
-		
 		switch(ACC_MODE) {
 			case 0: return tex2D(sPre, xy + MVi/RES);
 			case 1: return float4(acc.rgb / acc.w, 1.0);
@@ -180,8 +192,7 @@ namespace ZenTDF {
 		float4 pre = tex2D(sCur, xy);
 		float4 cur = float4(GetBackBuffer(xy), 1.0);
 		
-		float3 minC = 1.0;
-		float3 maxC = 0.0;
+		float3 minC = 1.0, maxC = 0.0;
 		
 		for(int i = 0; i < 9; i++)
 		{
@@ -190,7 +201,6 @@ namespace ZenTDF {
 			minC = min(minC, t);
 			maxC = max(maxC, t);
 		}
-		
 		pre.rgb = clamp(pre.rgb, minC, maxC);
 		
 		return lerp(cur, pre, TAA_LERP_VALUE);
