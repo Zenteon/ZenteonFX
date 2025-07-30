@@ -13,7 +13,7 @@
 	
 	
 	======================================================================	
-	Zenteon: Sharpen v0.1 - Authored by Daniel Oren-Ibarra "Zenteon"
+	Zenteon: ATA v0.1 - Authored by Daniel Oren-Ibarra "Zenteon"
 	
 	Discord: https://discord.gg/PpbcqJJs6h
 	Patreon: https://patreon.com/Zenteon
