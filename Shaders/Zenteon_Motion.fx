@@ -31,7 +31,7 @@
 
 uniform int MOT_QUALITY <
 	ui_type = "combo";
-	ui_label = "Motion QUality";
+	ui_label = "Motion Quality";
 	ui_items = "Low\0Medium\0High\0";
 > = 0;
 
@@ -302,6 +302,42 @@ namespace ZenMotion {
 	}
 	
 	
+	float3 VecToCol(float2 v)
+	{
+	    float rad = length(v);
+	    float a = atan2(-v.y, -v.x) / 3.14159265;
+	
+	    float fk = (a + 1.0) / 2.0 * 6.0;
+	    int k0 = fk % 7;
+	    int k1 = (k0 + 1) % 7;
+	    float f = fk - k0;
+	
+	    float3 cols[7] = {
+	        float3(1, 0, 0),
+	        float3(1, 1, 0),
+	        float3(0, 1, 0),
+	        float3(0, 1, 1),
+	        float3(0, 0, 1),
+	        float3(1, 0, 1),
+	        float3(1, 0, 0),
+			};
+	
+	    float3 col0 = cols[k0];
+	    float3 col1 = cols[k1];
+	
+	    float3 col = lerp(col0, col1, frac(f));
+	    //col = tex2D(sMotGrad, float2(0.5 * a, 0.0)).rgb;
+	    
+	    float j = 0.666667 * rad;
+	    float k = rad / (rad + 0.5);
+	    float l = saturate(rad*rad);
+		l = lerp(j,k,l);
+		
+	    
+	    return any(isnan(col)) ? 0.5 : lerp(0.5, col, saturate(l));
+	}
+	
+	
 	
 	float4 CalcMVL(sampler2D cur, sampler2D pre, int2 pos, float4 off, int RAD, bool reject)
 	{
@@ -401,6 +437,8 @@ namespace ZenMotion {
 			off += MV;
 			MV = 0.0;
 		}
+		
+		
 		return float4(off.xy, Err, 1.0);
 	}
 	
@@ -484,16 +522,37 @@ namespace ZenMotion {
 		return 0.25 * acc.x;
 	}
 	
+	float3 DUSample2(sampler input, float2 xy, float div)//0.375 + 0.25
+	{
+		float2 hp = 0.5 * div * rcp(RES);
+		float3 acc; float4 t;
+		float minD = 1.0;
+		
+		acc += tex2D(input, xy + float2( hp.x,  hp.y)).xyz;
+		acc += tex2D(input, xy + float2( hp.x, -hp.y)).xyz;
+		acc += tex2D(input, xy + float2(-hp.x,  hp.y)).xyz;
+		acc += tex2D(input, xy + float2(-hp.x, -hp.y)).xyz;
+		return 0.25 * acc;//dot(acc, rcp(3.0));
+	}
+	
 	
 	float Gauss0PS(PS_INPUTS) : SV_Target {
-		float lum = dot(GetBackBuffer(xy), rcp(3.0) );
+		float3 c = GetBackBuffer(xy);//DUSample2(ReShade::BackBuffer, xy, 1.0);
 		float dep = GetDepth(xy + 0.5 / RES);
+		
+		float dc = GetDepth(xy);
+		float d0 = GetDepth(xy + float2( 0.5, 0.5 ) / RES);
+		float d1 = GetDepth(xy + float2( 0.5,-0.5 ) / RES);
+		float d2 = GetDepth(xy + float2(-0.5, 0.5 ) / RES);
+		float d3 = GetDepth(xy + float2(-0.5,-0.5 ) / RES);
+		
+		float em = 0.5 * (abs(d0+d1-d2-d3) + abs(d0+d2-d1-d3)) / dc;// abs(dc - 0.25*(d0+d1+d2+d3));//
 		
 		float hlum = dot(GetBackBuffer(xy + 0.5 / RES), rcp(3.0) );
 		
-		if(lum <= exp2(-6)) lum += fwidth(dep) / (dep + 0.0001);
+		//if(lum <= exp2(-6)) lum += fwidth(dep) / (dep + 0.0001);
 		
-		return lum;//float2(lum, dep).xy; 
+		return log( 1.0 + 5.0 * (max(c.x, max(c.y, c.z)) - min(c.x, min(c.y, c.z)))) * (1.0 - em);//float2(lum, dep).xy; 
 	}
 	float2 Gauss1PS(PS_INPUTS) : SV_Target { return DUSample(sCG0, xy, 2.0).x; }
 	float2 Gauss2PS(PS_INPUTS) : SV_Target { return DUSample(sCG1, xy, 4.0).x; }
@@ -658,7 +717,7 @@ namespace ZenMotion {
 		{
 			float2 nxy = xy + mult * (ioff[i]);
 			float4 sam = Median5(sTemp0, float4(nxy,0,0).xy);
-			//float samD = tex2D(sMaxD, nxy).x;
+			float samD = GetDepth(nxy);//tex2D(sMaxD, nxy).x;
 			
 			float4 samC = tex2DgatherR(sPG0, xy + sam.xy / RES);
 			float tErr = distance(cenC, samC);
@@ -688,7 +747,7 @@ namespace ZenMotion {
 		{
 			float2 nxy = xy + mult * (ioff[i]);
 			float4 sam = Median5(sQuar, float4(nxy,0,0).xy);
-			//float samD = tex2D(sMaxD, nxy).x;
+			float samD = GetDepth(nxy);//tex2D(sMaxD, nxy).x;
 			
 			float3 samC = tex2D(sPreFrm, xy + sam.xy / RES).rgb;
 			float tErr = dot(cenC - samC, cenC - samC);
@@ -717,7 +776,7 @@ namespace ZenMotion {
 		{
 			float2 nxy = xy + mult * (ioff[i]);
 			float4 sam = Median5(sHalf, float4(nxy,0,0).xy);
-			//float samD = tex2D(sMaxD, nxy).x;
+			float samD = GetDepth(nxy);//tex2D(sMaxD, nxy).x;
 			
 			float3 samC = tex2D(sPreFrm, xy + sam.xy / RES).rgb;
 			float tErr = dot(cenC - samC, cenC - samC);
@@ -773,9 +832,9 @@ namespace ZenMotion {
 		MV *= rcp(FRAME_TIME);
 		//MV = 2.0 * MV / (abs(MV) + 0.002);
 		//MV = lerp(MV, MV / (abs(MV) + 0.001), saturate(MV));
-		MV = MV / (abs(MV) + 0.001);
+		MV = 5.0 * sign(MV) * (MV*MV+0.5*abs(MV)) / (MV*MV+0.5*abs(MV) + 0.002);//log(1.0 + );//MV / (abs(MV) + 0.0002);
 		float doc = tex2D(sDOC, xy).x;
-		return DEBUG ? MVtoRGB(MV) : GetBackBuffer(xy);
+		return DEBUG ? VecToCol(MV) : GetBackBuffer(xy);
 	}
 	
 	technique ZenMotion <
