@@ -13,7 +13,7 @@
 	
 	
 	======================================================================	
-	Zenteon: ATA v0.2 - Authored by Daniel Oren-Ibarra "Zenteon"
+	Zenteon: ATA v0.3 - Authored by Daniel Oren-Ibarra "Zenteon"
 	
 	Discord: https://discord.gg/PpbcqJJs6h
 	Patreon: https://patreon.com/Zenteon
@@ -34,6 +34,11 @@ uniform bool KILLSWITCH <
 	hidden = 1;
 > = 0;
 
+uniform bool DO_NEIGHBORHOOD <
+	hidden = 1;
+> = 1;
+
+
 uniform int ACC_MODE <
 	ui_type = "slider";
 	ui_tooltip = "0 is naive reprojection, very smeary, 1 is 3x3 nonlocal means, tends to denoise a bit too much \n"
@@ -47,16 +52,17 @@ uniform float FILTER_STRENGTH <
 	ui_min = 0.0;
 	ui_max = 1.0;
 	ui_label = "Filter Strength";
-	ui_tooltip = "Higher values will give a more stable but less detailed image";
+	ui_tooltip = "Higher values will give a more stable but less detailed image, can introduce aliasing";
 	ui_type = "slider";
-> = 0.8;
+> = 0.0;
 
 uniform int WEIGHT_MODE <
 	ui_type = "combo";
 	ui_items = "SSD\0Exp (configurable weight)\0";
 	ui_label = "Weight Type";
+	hidden = true;
 > = 1;
-#define NLM_WEIGHT_COEFF ( 2000.0 * (1.0 - 0.95 * FILTER_STRENGTH) * (1.0 - 0.95 * FILTER_STRENGTH) )
+#define NLM_WEIGHT_COEFF ( 5000.0 * (1.0 - 0.95 * FILTER_STRENGTH) * (1.0 - 0.95 * FILTER_STRENGTH) )
 
 uniform float TAA_LERP_VALUE <
 	ui_min = 0.7;
@@ -110,7 +116,7 @@ namespace ZenTDF {
 		for(int i = 0; i < 9; i++)
 		{
 			float3 ti = P0[i] - P1[i];
-			err += dot(ti, ti);
+			err += dot(ti, ti) / dot(1.0, P0[i] + P1[i] + 0.001);
 		}
 		if(WEIGHT_MODE == 0) return rcp(wm * err + 1e-18); //  I like this better, but less configurable
 		return fastExpN( 0.1111111 * wm * err);
@@ -132,6 +138,7 @@ namespace ZenTDF {
 	//=======================================================================================
 	//Passes
 	//=======================================================================================
+
 	
 	float4 CurPS(PS_INPUTS) : SV_Target
 	{	
@@ -164,20 +171,21 @@ namespace ZenTDF {
 		*/
 		
 		t = S[1].w+S[2].w+S[4].w+S[5].w;
-		wm = t > wm.z ? float3( 1, 1, t) : wm;
+		wm = t > wm.z ? float3( 0, 1, t) : wm;
 		t = S[4].w+S[5].w+S[7].w+S[8].w;
-		wm = t > wm.z ? float3( 1,-1, t) : wm;	
+		wm = t > wm.z ? float3( 0, 0, t) : wm;	
 		t = S[0].w+S[1].w+S[3].w+S[4].w;
 		wm = t > wm.z ? float3(-1, 1, t) : wm;	
 		t = S[3].w+S[4].w+S[6].w+S[7].w;
-		wm = t > wm.z ? float3(-1,-1, t) : wm;
+		wm = t > wm.z ? float3(-1, 0, t) : wm;
 		
 		float4 acn;
 		
-		acn = all( abs(wm.xy - float2( 1, 1)) < 0.001 ) ? S[1]+S[2]+S[4]+S[5] : acn;
-		acn = all( abs(wm.xy - float2( 1,-1)) < 0.001 ) ? S[4]+S[5]+S[7]+S[8] : acn;
+		acn = all( abs(wm.xy - float2( 0, 1)) < 0.001 ) ? S[1]+S[2]+S[4]+S[5] : acn;
+		acn = all( abs(wm.xy - float2( 0, 0)) < 0.001 ) ? S[4]+S[5]+S[7]+S[8] : acn;
 		acn = all( abs(wm.xy - float2(-1, 1)) < 0.001 ) ? S[0]+S[1]+S[3]+S[4] : acn;
-		acn = all( abs(wm.xy - float2(-1,-1)) < 0.001 ) ? S[3]+S[4]+S[6]+S[7] : acn;
+		acn = all( abs(wm.xy - float2(-1, 0)) < 0.001 ) ? S[3]+S[4]+S[6]+S[7] : acn;
+		
 		
 		switch(ACC_MODE) {
 			case 0: return tex2D(sPre, xy + MVi/RES);
@@ -190,7 +198,21 @@ namespace ZenTDF {
 	float4 PrePS(PS_INPUTS) : SV_Target
 	{	 
 		float4 pre = tex2D(sCur, xy);
+		
 		float4 cur = float4(GetBackBuffer(xy), 1.0);
+		
+		float3 MV;
+		
+		#if(USE_FRAMEWORK_MOTION)
+			MV = GetVelocity(xy).xy;
+		#else
+			MV.xy = tex2D(sMV, xy).xy;
+			MV.z = tex2D(sDOC, xy).x;
+		#endif
+		
+		float2 txy = xy + MV.xy;
+		float2 range = saturate(txy * txy - txy);
+		MV.z *= range.x == -range.y;
 		
 		float3 minC = 1.0, maxC = 0.0;
 		
@@ -201,9 +223,9 @@ namespace ZenTDF {
 			minC = min(minC, t);
 			maxC = max(maxC, t);
 		}
-		pre.rgb = clamp(pre.rgb, minC, maxC);
+		if(DO_NEIGHBORHOOD) pre.rgb = clamp(pre.rgb, minC, maxC);
 		
-		return lerp(cur, pre, TAA_LERP_VALUE);
+		return lerp(cur, pre, MV.z * TAA_LERP_VALUE);
 	}
 	
 	//=======================================================================================
