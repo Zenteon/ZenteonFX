@@ -22,8 +22,6 @@
 */
 //========================================================================
 		
-//Not sure what else to call this, half res vectors, half pixel precision
-
 #define _SUBPIXEL_FLOW 0
 
 #include "ReShade.fxh"
@@ -48,7 +46,9 @@ uniform bool TEST0 <
 
 //stablize debug
 uniform float FRAME_TIME < source = "frametime"; >;
-
+uniform int FRAME_COUNT <
+	source = "framecount";>;
+	
 /*
 	16 taps
  6
@@ -132,27 +132,36 @@ static const int2 off20[20] = {
 static const int2 off5[5] = { int2(0,0), int2(0,2), int2(2,0), int2(2,2), int2(1,1) };
 
 	#define BLOCK_POS_CT 9
-	#define UBLOCK off9
+	#define UBLOCK off92
 	#define TEMPORAL 1
 	
-
-	
+/*
+	texture2D tF0 < source = "frame_0018.png"; > { Width = 1024; Height = 436; Format = RGBA8; };
+	sampler2D sF0 { Texture = tF0; };
+	texture2D tF1 < source = "frame_0019.png"; > { Width = 1024; Height = 436; Format = RGBA8; };
+	sampler2D sF1 { Texture = tF1; };
+	*/
 	//Pass helpers
 	
 	texture texMotionVectors { DIVRES(1); Format = RG16F; };
 	texture tDOC { DIVRES(1); Format = R8; };
 	sampler sDOC { Texture = tDOC; };
 	sampler sMV { Texture = texMotionVectors; };
+	texture2D tMotGrad <source = "ZenMotGrad.png"; > { Width = 44; Height = 1; Format = RGBA8; };
+	sampler2D sMotGrad { Texture = tMotGrad; WRAPMODE(REPEAT); };
 namespace ZenMotion {
 		
 	#define FWRAP CLAMP
 	#define LFORM RGBA16F
-	#define LFILT POINT
+	#define LFILT LINEAR
 	#define PFILT R16
 	#define DIV_LEV (2 - _SUBPIXEL_FLOW)
 	//#define BLOCK_SIZE 4
 	
 	#define BLOCKS_SIZE 2
+	
+	texture tVN < source = "ZenteonBN.png"; > { Width = 512; Height = 512; Format = RGBA8; };
+	sampler sVN { Texture = tVN; FILTER(POINT); WRAPMODE(WRAP); }; 
 	
 	//optical flow
 	
@@ -173,6 +182,14 @@ namespace ZenMotion {
 	texture2D tFull  { DIVRES(1); Format = RGBA16F; };
 	sampler2D sFull  { Texture = tFull; FILTER(POINT); };
 	
+	texture2D tLD0 { DIVRES(1); Format = R16; };
+	sampler2D sLD0 { Texture = tLD0; FILTER(POINT); };
+	texture2D tLD1 { DIVRES(2); Format = R16; };
+	sampler2D sLD1 { Texture = tLD1; FILTER(POINT); };
+	texture2D tLD2 { DIVRES(4); Format = R16; };
+	sampler2D sLD2 { Texture = tLD2; FILTER(POINT); };
+	texture2D tLD3 { DIVRES(8); Format = R16; };
+	sampler2D sLD3 { Texture = tLD3; FILTER(POINT); };
 	
 	texture2D tLevel1 { DIVRES((4 * DIV_LEV)); Format = LFORM; };
 	sampler2D sLevel1 { Texture = tLevel1; FILTER(LFILT); WRAPMODE(FWRAP); };
@@ -226,18 +243,66 @@ namespace ZenMotion {
 	    return frac( conVr.z * frac(dot(xy % RES,conVr.xy)) );
 	}
 	
+	float3 nBackBuffer(float2 xy)
+	{
+		//return tex2D(sF0, xy).rgb;
+		return GetBackBuffer(xy);
+	}
+	
 	
 	//=======================================================================================
 	//Optical Flow Functions
 	//=======================================================================================
 	
+	
+	float4 tex2Dct(sampler2D tex, float2 xy)
+	{
+	    float2 ts = tex2Dsize(tex);
+	    xy = xy*ts + 0.5;
+	    float2 iuv = floor(xy);
+	    float2 fuv = frac(xy);
+	    float2 j = 2.0*abs(fuv-0.5); j*=j;
+	    xy = iuv + lerp(fuv, fuv*fuv*(3.0-2.0*fuv), 1.0);
+	    xy = (xy - 0.5)/ts;
+	    return tex2Dlod( tex, float4(xy,0,0) );
+	}
+	
 	float4 tex2DfetchLin(sampler2D tex, float2 vpos)
 	{
 		//return tex2Dfetch(tex, vpos);
 		float2 s = tex2Dsize(tex);
+		//return tex2DlodS(tex, vpos / s, 0.0);
+		//return tex2Dct(tex, vpos / s);
 		return tex2Dlod(tex, float4(vpos / s, 0, 0));
 		//return texLodBicubic(tex, vpos / s, 0.0);
 	}
+	
+	float Sample(sampler2D tex, float2 pos, float2 texelCount)
+	{
+	    float2 uv0 = pos;
+	    
+	    pos -= (0.5);
+	    
+	    float2 uvi = floor(pos);
+	    float2 uvf = pos - uvi;
+	
+	    float2 mo = uvf - uvf*uvf;
+	    
+	    uvf = (uvf - mo) / (1.0 - 2.0 * mo);// map modulator to s-curve
+		
+		//mo = (mo * -0.5 + 1.0) * mo;
+		
+	    pos = uvi + uvf + (0.5);
+	
+	    float v = tex2Dlod(tex, float4(pos / texelCount,0,0) ).x;
+	    
+	    mo *= frac(uvi * 0.5) * 4.0 - 1.0;// flip modulator bump on every 2nd interval
+	    
+	    return dot(v, float4(mo.xy, mo.x*mo.y, 1.0));
+	}
+
+	
+	
 	
 	float3 tex2DfetchLinD(sampler2D tex, float2 vpos)
 	{
@@ -272,35 +337,32 @@ namespace ZenMotion {
 	
 	float BlockErr(float Block0[BLOCK_POS_CT], float Block1[BLOCK_POS_CT])
 	{
-		float ssd; float norm;
-		for(int i; i < BLOCK_POS_CT; i++)
+		float3 acc; float2 m2; float2 ssd; float2 m1;
+		[loop]
+		for(int i = 0; i < BLOCK_POS_CT; i++)
 		{
-			float t = (Block0[i] - Block1[i]);
-			ssd += abs(t);
-			norm += Block0[i] + Block1[i];
-		
+			float2 t = float2(Block0[i], Block1[i]);
+			acc += float3(t.x*t.y, t.x, t.y);
+			m2 += t*t;	
+			m1 += t;
+			ssd += float2(abs(t.x-t.y), t.x+t.y);
 		}
-		ssd /= norm + 0.001;
-		return ssd;
-	}
-	
-
-	float3 HueToRGB(float hue)
-	{
-	    float3 fr = frac(hue.xxx + float3(0.0, -1.0/3.0, 1.0/3.0));
-	    return 3.0 * abs(1.0 - 2.0*fr) - 1.0;
-	}
+		acc /= BLOCK_POS_CT;
+		m2 /= BLOCK_POS_CT;
+		m1 /= BLOCK_POS_CT;
+		precise float cov = (acc.x - acc.y*acc.z);
+		precise float2 v = float2(m2.x - acc.y * acc.y, m2.y - acc.z * acc.z);
 		
-	float3 MVtoRGB( float2 MV )
-	{
-		float3 col = HueToRGB(atan2(MV.y, MV.x) / 6.28);
-		if(any(isnan(col))) return 0.7152;
-		float lmv = length(MV);
 		
-		return lerp(0.7152, col, lmv );
-	
+		//float nor = sqrt(v.x)*sqrt(v.y);
+		//return 1.0 - cov / nor;
+		//zmssim
+		return 0.5 - (cov) / (v.x+v.y + exp2(-64) );
+		//x /= 0.3;
+		//x = 1.0 - x*x;
+		//return saturate(2.0 * x);//saturate(1.0 - x*x);
+		//return 1.0 - ( (2.0*m1.x*m1.y) * (2.0 * cov) ) / ( (m1.x*m1.x + m1.y*m1.y) * (v.x + v.y) );
 	}
-	
 	
 	float3 VecToCol(float2 v)
 	{
@@ -334,7 +396,7 @@ namespace ZenMotion {
 		l = lerp(j,k,l);
 		
 	    
-	    return any(isnan(col)) ? 0.5 : lerp(0.5, col, saturate(l));
+	    return any(isnan(col)) ? 0.0 : lerp(0.0, col, saturate(l));
 	}
 	
 	
@@ -350,10 +412,12 @@ namespace ZenMotion {
 		float2 noff = off.xy;
 		
 		float Err = BlockErr(cBlock, sBlock);
-
+		
+		[loop]
 		for(int q = 0; q <= MOT_QUALITY; q++)
 		{
 			float exm = exp2(-q);
+			[loop]
 			for(int i = -RAD; i <= RAD; i++) for(int ii = -RAD; ii <= RAD; ii++)
 			{
 				if(Err < 0.01) break;
@@ -388,6 +452,53 @@ namespace ZenMotion {
 		float2(-1,1),  float2(0,2),  float2(1,1)
 	};
 	
+	#define HW 2
+	
+	float2 LKFlow5x5(float2 uv, sampler2D tex0, sampler2D tex1)
+	{
+	    float Axx = 0.0, Axy = 0.0, Ayy = 0.0;
+	    float bx  = 0.0, by  = 0.0;
+		
+		float2 texelSize = rcp(tex2Dsize(tex0));
+		float Ic = tex2D(tex0, uv).r;
+	    int i = 0;
+	    for (int dy = -HW; dy <= HW; dy++)
+	    {
+	        for (int dx = -HW; dx <= HW; dx++)
+	        {
+	            float2 offset = 2.0 * float2(dx, dy) * texelSize;
+	            float2 p = uv + offset;
+	
+	            float I0 = tex2D(tex0, p).r;
+	            float I1 = tex2D(tex1, p).r;
+	            float Ix = (tex2D(tex0, p + float2(texelSize.x, 0)).r - tex2D(tex0, p - float2(texelSize.x, 0)).r) * 0.5;
+	            float Iy = (tex2D(tex0, p + float2(0, texelSize.y)).r - tex2D(tex0, p - float2(0, texelSize.y)).r) * 0.5;
+	            float It = I1 - I0;
+	
+	            float w = rcp(1.0 + 1000.0 * abs(Ic - I0)*abs(Ic - I0) );//dot( float2(Ix,Iy), float2(Ix,Iy) );
+				w *= (abs(Ix)+abs(Iy));
+				
+	            Axx += w * Ix * Ix;
+	            Axy += w * Ix * Iy;
+	            Ayy += w * Iy * Iy;
+	
+	            bx  += w * Ix * It;
+	            by  += w * Iy * It;
+	        }
+	    }
+	
+	    float det = Axx * Ayy - Axy * Axy + exp2(-64);
+	
+	    //if (abs(det) < 1e-5)
+	    //    return float2(0, 0); // ill-conditioned
+	
+	    float2 flow;
+	    flow.x = (Ayy * (-bx) - Axy * (-by)) / det;
+	    flow.y = (Axx * (-by) - Axy * (-bx)) / det;
+	
+	    return flow;
+	}
+	
 	float4 CalcMV(sampler2D cur, sampler2D pre, int2 pos, float4 off, int RAD, float mult)
 	{
 		float cBlock[BLOCK_POS_CT];
@@ -397,15 +508,17 @@ namespace ZenMotion {
 		
 		float2 MV;
 		
-		float Err = BlockErr(cBlock, sBlock);
+		if(TEST0) mult *= 0.5 + tex2Dfetch(sVN, pos % 512).x;
 		
+		float Err = BlockErr(cBlock, sBlock);
+		float tErr = Err;
 		
 		for(int i = 0; i < 8; i++)
 		{
 			if(Err < 0.001) break;
 			float2 noff = mult * soff8[i];
 			GetBlock(pre, pos, noff + off.xy, 4.0, sBlock);
-			float tErr = BlockErr(cBlock, sBlock);
+			tErr = lerp(tErr, BlockErr(cBlock, sBlock), 1.0);
 			
 			[flatten]
 			if(tErr < Err)
@@ -425,7 +538,7 @@ namespace ZenMotion {
 				if(Err < 0.001) break;
 				float2 noff = mult * soff4F[i];
 				GetBlock(pre, pos, exm * noff + off.xy, 4.0, sBlock);
-				float tErr = BlockErr(cBlock, sBlock);
+				tErr = lerp(tErr, BlockErr(cBlock, sBlock), 1.0);
 				
 				[flatten]
 				if(tErr < Err)
@@ -438,8 +551,10 @@ namespace ZenMotion {
 			MV = 0.0;
 		}
 		
+		//if(TEST0) MV = 0.25 * LKFlow5x5(4.0 * (pos + off.xy) / float2(tex2Dsize(cur)), cur, pre);
 		
-		return float4(off.xy, Err, 1.0);
+		
+		return float4(off.xy + MV, Err, 1.0);
 	}
 	
 	//based on https://stackoverflow.com/questions/480960/how-do-i-calculate-the-median-of-five-in-c/6984153#6984153
@@ -482,9 +597,9 @@ namespace ZenMotion {
 		
 		for(int i = 1; i <= 1; i++) for(int ii; ii < 5; ii++)
 		{
-			float4 samMV = 2.0 * tex2DfetchLin(tex, 2 * i * ioff[ii] + 0.5 * vpos);
-			float4 clampMV = 2.0 * tex2DfetchLin(tex, 2 * i * ioffc[ii].xy + 0.5 * vpos);
-			clampMV.zw = 2.0 * tex2DfetchLin(tex, 2 * i * ioffc[ii].zw + 0.5 * vpos).xy;
+			float4 samMV = 2.0 * tex2DfetchLin(tex, 1.5 * i * ioff[ii] + 0.5 * vpos);
+			float4 clampMV = 2.0 * tex2DfetchLin(tex, 1.5 * i * ioffc[ii].xy + 0.5 * vpos);
+			clampMV.zw = 2.0 * tex2DfetchLin(tex, 1.5 * i * ioffc[ii].zw + 0.5 * vpos).xy;
 			
 			
 			GetBlock(pre, vpos, samMV.xy, 4.0, sBlock);
@@ -515,45 +630,53 @@ namespace ZenMotion {
 		float acc; float4 t;
 		float minD = 1.0;
 		
-		acc += tex2D(input, xy + float2( hp.x,  hp.y)).x;
-		acc += tex2D(input, xy + float2( hp.x, -hp.y)).x;
-		acc += tex2D(input, xy + float2(-hp.x,  hp.y)).x;
-		acc += tex2D(input, xy + float2(-hp.x, -hp.y)).x;
-		return 0.25 * acc.x;
+		for(int i = -1; i <= 1; i++) for(int j = -1; j <= 1; j++)
+		{
+			float2 nxy = xy + float2(i,j) * hp;
+			acc += tex2Dlod(input, float4(nxy, 0,0) ).x;
+		}
+		//acc += tex2D(input, xy + float2( hp.x,  hp.y)).x;
+		//acc += tex2D(input, xy + float2( hp.x, -hp.y)).x;
+		//acc += tex2D(input, xy + float2(-hp.x,  hp.y)).x;
+		//acc += tex2D(input, xy + float2(-hp.x, -hp.y)).x;
+		return acc / 9.0;
 	}
 	
-	float3 DUSample2(sampler input, float2 xy, float div)//0.375 + 0.25
+	float CDepPS(PS_INPUTS) : SV_Target
 	{
-		float2 hp = 0.5 * div * rcp(RES);
-		float3 acc; float4 t;
-		float minD = 1.0;
-		
-		acc += tex2D(input, xy + float2( hp.x,  hp.y)).xyz;
-		acc += tex2D(input, xy + float2( hp.x, -hp.y)).xyz;
-		acc += tex2D(input, xy + float2(-hp.x,  hp.y)).xyz;
-		acc += tex2D(input, xy + float2(-hp.x, -hp.y)).xyz;
-		return 0.25 * acc;//dot(acc, rcp(3.0));
+		return GetDepth(xy);
 	}
-	
-	
 	float Gauss0PS(PS_INPUTS) : SV_Target {
-		float3 c = GetBackBuffer(xy);//DUSample2(ReShade::BackBuffer, xy, 1.0);
+		float3 c = nBackBuffer(xy);
+		
+		//if( (FRAME_COUNT % 2) == 0) c = tex2D(sF0, xy).rgb;
+		//else c = tex2D(sF1, xy).rgb;
+		
+		float lum = dot(c, rcp(3.0) );
 		float dep = GetDepth(xy + 0.5 / RES);
 		
-		float dc = GetDepth(xy);
-		float d0 = GetDepth(xy + float2( 0.5, 0.5 ) / RES);
-		float d1 = GetDepth(xy + float2( 0.5,-0.5 ) / RES);
-		float d2 = GetDepth(xy + float2(-0.5, 0.5 ) / RES);
-		float d3 = GetDepth(xy + float2(-0.5,-0.5 ) / RES);
-		
-		float em = 0.5 * (abs(d0+d1-d2-d3) + abs(d0+d2-d1-d3)) / dc;// abs(dc - 0.25*(d0+d1+d2+d3));//
-		
-		float hlum = dot(GetBackBuffer(xy + 0.5 / RES), rcp(3.0) );
+		float hlum = dot(nBackBuffer(xy + 0.5 / RES), rcp(3.0) );
 		
 		//if(lum <= exp2(-6)) lum += fwidth(dep) / (dep + 0.0001);
 		
-		return log( 1.0 + 5.0 * (max(c.x, max(c.y, c.z)) - min(c.x, min(c.y, c.z)))) * (1.0 - em);//float2(lum, dep).xy; 
+		//float m = min( min(c.r,c.g), c.b);
+		//float M = max( max(c.r,c.g), c.b);
+		
+		//if(TEST0) return M - m;//lum;//float2(lum, dep).xy; 
+		
+		return lum;
 	}
+	
+	float minGather(sampler2D tex, float2 xy)
+	{
+		float4 g = tex2DgatherR(tex, xy);
+		return min( min(g.x,g.y), min(g.z,g.w) );
+	}
+	float DD0PS(PS_INPUTS) : SV_Target { return GetDepth(xy); };
+	float DD1PS(PS_INPUTS) : SV_Target { return minGather(sLD0, xy); };
+	float DD2PS(PS_INPUTS) : SV_Target { return minGather(sLD1, xy); };
+	float DD3PS(PS_INPUTS) : SV_Target { return minGather(sLD2, xy); };
+	
 	float2 Gauss1PS(PS_INPUTS) : SV_Target { return DUSample(sCG0, xy, 2.0).x; }
 	float2 Gauss2PS(PS_INPUTS) : SV_Target { return DUSample(sCG1, xy, 4.0).x; }
 	float2 Gauss3PS(PS_INPUTS) : SV_Target { return DUSample(sCG2, xy, 8.0).x; }
@@ -561,7 +684,7 @@ namespace ZenMotion {
 	float2 Gauss5PS(PS_INPUTS) : SV_Target { return DUSample(sCG4, xy, 32.0).x; }
 	
 	float4 CopyFlowPS(PS_INPUTS) : SV_Target { return tex2D(sLevel0, xy); }
-	float3 CopyColPS(PS_INPUTS) : SV_Target { return GetBackBuffer(xy); }
+	float3 CopyColPS(PS_INPUTS) : SV_Target { return nBackBuffer(xy); }
 	float Copy0PS(PS_INPUTS) : SV_Target { return tex2D(sCG0, xy).x; }
 	float Copy1PS(PS_INPUTS) : SV_Target { return tex2D(sCG1, xy).x; }
 	float Copy2PS(PS_INPUTS) : SV_Target { return tex2D(sCG2, xy).x; }
@@ -670,57 +793,63 @@ namespace ZenMotion {
 		return float4(med.rgb, med.a);
 	}
 	
-	float4 FloodAPS(PS_INPUTS) : SV_Target { return Median9(sLevel0, xy); }
-	float4 FloodBPS(PS_INPUTS) : SV_Target { return Median9(sTemp1, xy); }
-	
-	//=======================================================================================
-	//Blending
-	//=======================================================================================
-	#define FRAD 1
-	float4 FilterMVAtrous(sampler2D tex, float2 xy, float level)
+	float4 Filter8(sampler2D tex, float2 xy, float level)
 	{
-		float cenC = sqrt(tex2D(sCG1, xy).x);
-		float2 its = 8.0 * rcp(RES);
+		float cenD = tex2Dlod(sLD3, float4(xy,0,0)).x;
+		
+		float2 its = exp2(level) * 8.0 * rcp(RES);
 		
 		float4 acc; float accw;
 		
-		for( int i = -FRAD; i <= FRAD; i++) for( int j = -FRAD; j <= FRAD; j++)
+		for(int i = -1; i <= 1; i++) for(int j = -1; j <= 1; j++)
 		{
-			float2 nxy = xy + its * float2(i,j);
-			float samC = sqrt(tex2Dlod(sCG1, float4(nxy,0,0)).x);
-			float4 samM = tex2Dlod(tex, float4(nxy,0,0));
+			float2 nxy = xy + float2(i,j) * its;
 			
-			float w = exp( -10.0 * abs(samC - cenC) / (samC + cenC + 0.01) );
-			acc += samM * w;
+			float samD = tex2Dlod(sLD3, float4(nxy,0,0)).x;
+			float w = exp( -30.0 * abs(cenD - samD) / (cenD + 1e-10)) + 1e-10;
+			
+			float4 sam = tex2Dlod(tex, float4(nxy,0,0));
+			
+			acc += sam * w;
 			accw += w;
 		}
 		return acc / accw;
 	}
 	
-	float4 SmoothMV3(PS_INPUTS) : SV_Target { return FilterMVAtrous(sTemp0, xy, 3.0); }
-	float4 SmoothMV2(PS_INPUTS) : SV_Target { return FilterMVAtrous(sTemp1, xy, 2.0); }
-	float4 SmoothMV1(PS_INPUTS) : SV_Target { return FilterMVAtrous(sTemp0, xy, 1.0); }
-	float4 SmoothMV0(PS_INPUTS) : SV_Target { return FilterMVAtrous(sTemp1, xy, 0.0); }
+	float4 Flood0PS(PS_INPUTS) : SV_Target { return Median9(sLevel0, xy); }
+	float4 Flood1PS(PS_INPUTS) : SV_Target { return Filter8(sTemp1, xy, 2.0); }
+	float4 Flood2PS(PS_INPUTS) : SV_Target { return Filter8(sTemp0, xy, 1.0); }
+	float4 Flood3PS(PS_INPUTS) : SV_Target { return Filter8(sTemp1, xy, 0.0); }
+	
+	
+	//=======================================================================================
+	//Blending
+	//=======================================================================================
+	
+	
+	
 	
 	float4 UpscaleMVI0(PS_INPUTS) : SV_Target
 	{
+		/*
 		//large offset since median sampling, helps quite a bit at finding good candidates
-		float2 mult = 4.0 * rcp(tex2Dsize(sTemp0));
-		float cenD = GetDepth(xy);
+		float2 mult = 1.0 * rcp(tex2Dsize(sTemp0));
+		float cenD = tex2Dlod(sLD2, float4(xy,0,0)).x;
 		
 		float4 cenC = tex2DgatherR(sCG0, xy);
 		
 		float4 cd;
-		float err = 1.0;
+		float err = 100.0;
+		float4 acc; float accw;
 		
 		for(int i=0; i <5; i++)
 		{
 			float2 nxy = xy + mult * (ioff[i]);
-			float4 sam = Median5(sTemp0, float4(nxy,0,0).xy);
-			float samD = GetDepth(nxy);//tex2D(sMaxD, nxy).x;
+			float4 sam = tex2Dlod(sTemp0, float4(nxy,0,0));
 			
+			float samD = tex2Dlod(sLD3, float4(nxy,0,0)).x;
 			float4 samC = tex2DgatherR(sPG0, xy + sam.xy / RES);
-			float tErr = distance(cenC, samC);
+			float tErr = abs(cenD - samD);//(cenC, samC);
 			
 			[flatten]
 			if(tErr < err)
@@ -730,24 +859,46 @@ namespace ZenMotion {
 			}
 		}
 		return cd;
+		*/
+		
+		float cenD = tex2Dlod(sLD2, float4(xy,0,0)).x;
+		
+		float2 its = 8.0 * rcp(RES);
+		
+		float4 acc; float accw;
+		
+		for(int i = -1; i <= 1; i++) for(int j = -1; j <= 1; j++)
+		{
+			float2 nxy = xy + float2(i,j) * its;
+			
+			float samD = tex2Dlod(sLD3, float4(nxy,0,0)).x;
+			float w = exp( -50.0 * abs(cenD - samD) / (cenD + 1e-10)) + 1e-10;
+			
+			float4 sam = tex2Dlod(sTemp0, float4(nxy,0,0));
+			
+			acc += sam * w;
+			accw += w;
+		}
+		return acc / accw;
 	}
 	
 	float4 UpscaleMVI(PS_INPUTS) : SV_Target
 	{
+		/*
 		//large offset since median sampling, helps quite a bit at finding good candidates
-		float2 mult = 2.0 * rcp(tex2Dsize(sQuar));
+		float2 mult = 1.0 * rcp(tex2Dsize(sQuar));
 		float cenD = GetDepth(xy);
 		//not as robust as multiple points, but it should be within a single pixel by now
-		float3 cenC = GetBackBuffer(xy);
+		float3 cenC = nBackBuffer(xy);
 		
 		float4 cd;
-		float err = 10.0;
+		float err = 100.0;
 		
 		for(int i=0; i <5; i++)
 		{
 			float2 nxy = xy + mult * (ioff[i]);
-			float4 sam = Median5(sQuar, float4(nxy,0,0).xy);
-			float samD = GetDepth(nxy);//tex2D(sMaxD, nxy).x;
+			float4 sam = tex2Dlod(sQuar, float4(nxy,0,0));
+			//float samD = tex2D(sMaxD, nxy).x;
 			
 			float3 samC = tex2D(sPreFrm, xy + sam.xy / RES).rgb;
 			float tErr = dot(cenC - samC, cenC - samC);
@@ -760,23 +911,45 @@ namespace ZenMotion {
 			}
 		}
 		return cd;
+		*/
+		
+		float cenD = tex2Dlod(sLD1, float4(xy,0,0)).x;
+		
+		float2 its = 4.0 * rcp(RES);
+		
+		float4 acc; float accw;
+		
+		for(int i = -1; i <= 1; i++) for(int j = -1; j <= 1; j++)
+		{
+			float2 nxy = xy + float2(i,j) * its;
+			
+			float samD = tex2Dlod(sLD2, float4(nxy,0,0)).x;
+			float w = exp( -50.0 * abs(cenD - samD) / (cenD + 1e-10)) + 1e-10;
+			
+			float4 sam = tex2Dlod(sQuar, float4(nxy,0,0));
+			
+			acc += sam * w;
+			accw += w;
+		}
+		return acc / accw;
 	}
 	
 	float4 UpscaleMV(PS_INPUTS) : SV_Target
 	{
+		/*
 		float2 mult = 1.0 * rcp(tex2Dsize(sHalf));
 		float cenD = GetDepth(xy);
 		
-		float3 cenC = GetBackBuffer(xy);
+		float3 cenC = nBackBuffer(xy);
 		
 		float4 cd;
-		float err = 10.0;
+		float err = 100.0;
 		
 		for(int i=0; i <5; i++)
 		{
 			float2 nxy = xy + mult * (ioff[i]);
-			float4 sam = Median5(sHalf, float4(nxy,0,0).xy);
-			float samD = GetDepth(nxy);//tex2D(sMaxD, nxy).x;
+			float4 sam = tex2Dlod(sHalf, float4(nxy,0,0));
+			//float samD = tex2D(sMaxD, nxy).x;
 			
 			float3 samC = tex2D(sPreFrm, xy + sam.xy / RES).rgb;
 			float tErr = dot(cenC - samC, cenC - samC);
@@ -789,6 +962,27 @@ namespace ZenMotion {
 			}	
 		}
 		return float4(cd.xy, err, 1.0);
+		*/
+		
+		float cenD = tex2Dlod(sLD0, float4(xy,0,0)).x;
+		
+		float2 its = 2.0 * rcp(RES);
+		
+		float4 acc; float accw;
+		
+		for(int i = -1; i <= 1; i++) for(int j = -1; j <= 1; j++)
+		{
+			float2 nxy = xy + float2(i,j) * its;
+			
+			float samD = tex2Dlod(sLD1, float4(nxy,0,0)).x;
+			float w = exp( -50.0 * abs(cenD - samD) / (cenD + 1e-10)) + 1e-10;
+			
+			float4 sam = tex2Dlod(sHalf, float4(nxy,0,0));
+			
+			acc += sam * w;
+			accw += w;
+		}
+		return acc / accw;
 	}
 	
 	
@@ -812,13 +1006,13 @@ namespace ZenMotion {
 			}
 		}
 		
-		
+		//MV = tex2D(sFull, xy).xyz;
 		
 		float2 backV = tex2D(sFull, xy + MV.xy / RES).xy;
 		//doc = length(MV.xy - backV) < 0.25 * (length(MV.xy) + 1.0);\
 		doc = rcp(length(MV.xy - backV) / length(MV.xy) + 1.0);
 		doc = all(abs(MV.xy) < 1.0) ? 1.0 : doc; 
-		
+		doc = doc > 0.9;
 		
 		MV.xy /= 1.0 + _SUBPIXEL_FLOW;
 		mv = any(abs(MV.xy) > 0.0001) ? MV.xy / RES : 0.0;
@@ -826,15 +1020,31 @@ namespace ZenMotion {
 	
 	float3 BlendPS(PS_INPUTS) : SV_Target
 	{
-		float2 MV = tex2D(sMV, xy + 2.0 / RES).xy;
+		float2 MV = tex2D(sFull, xy).xy;
+		//MV = tex2D(sTemp0, xy).xy / RES;
 		//MV *= (RES);
-		
 		MV *= rcp(FRAME_TIME);
+		//MV *= 0.5;
+		MV.y *= -1.0;
+		//MV *=  (FRAME_COUNT % 2) == 0 ? 1.0 : -1.0;
+		//MV /= 0.5 * abs(MV) + 1.0;
+		//float mvL = length(MV);
+		//MV /= mvL;
+		
+		//float l = saturate(mvL*mvL);
+		//float k = mvL / (mvL + 0.5);
+		////float j = 0.666667 * mvL;
+		//MV *= lerp(k,j,l);
+		
+		
 		//MV = 2.0 * MV / (abs(MV) + 0.002);
 		//MV = lerp(MV, MV / (abs(MV) + 0.001), saturate(MV));
-		MV = 5.0 * sign(MV) * (MV*MV+0.5*abs(MV)) / (MV*MV+0.5*abs(MV) + 0.002);//log(1.0 + );//MV / (abs(MV) + 0.0002);
+		//MV = MV / (abs(MV) + 0.00025);
 		float doc = tex2D(sDOC, xy).x;
-		return DEBUG ? VecToCol(MV) : GetBackBuffer(xy);
+		return DEBUG ? VecToCol(MV) : nBackBuffer(xy);
+		//return tex2D(sCG4, xy).x;
+		//return tex2Dct(sCG4, xy).x;
+		//return tex2D(sCG4, xy).x;
 	}
 	
 	technique ZenMotion <
@@ -855,6 +1065,11 @@ namespace ZenMotion {
 		pass {	PASS1(Gauss4PS, tCG4); }
 		pass {	PASS1(Gauss5PS, tCG5); }
 	
+		pass {	PASS1(DD0PS, tLD0); }
+		pass {	PASS1(DD1PS, tLD1); }
+		pass {	PASS1(DD2PS, tLD2); }
+		pass {	PASS1(DD3PS, tLD3); }
+		
 		//optical flow
 		pass {	PASS1(Level5PS, tLevel5); }
 		pass {	PASS1(Level4PS, tLevel4); }
@@ -863,8 +1078,10 @@ namespace ZenMotion {
 		pass {	PASS1(Level1PS, tLevel1); }
 		pass {	PASS1(Level0PS, tLevel0); }	
 		
-		pass {	PASS1(FloodAPS, tTemp1); }
-		pass {	PASS1(FloodBPS, tTemp0); }	
+		pass {	PASS1(Flood0PS, tTemp1); }
+		pass {	PASS1(Flood1PS, tTemp0); }	
+		pass {	PASS1(Flood2PS, tTemp1); }	
+		pass {	PASS1(Flood3PS, tTemp0); }	
 		
 		pass {	PASS1(UpscaleMVI0, tQuar); }	
 		pass {	PASS1(UpscaleMVI, tHalf); }	
