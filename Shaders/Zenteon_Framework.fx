@@ -33,6 +33,8 @@
 //============================================================================================
 #endif
 
+uniform float FRAME_TIME < source = "frametime"; >;
+
 uniform int PROCESS_NORMALS <
 	ui_type = "slider";
 	ui_min = 0;
@@ -183,6 +185,15 @@ namespace FrameWork {
 	texture2D tFull  { DIVRES(1); Format = RGBA16F; };
 	sampler2D sFull  { Texture = tFull; FILTER(POINT); };
 	
+	texture2D tLD0 { DIVRES(1); Format = R16; };
+	sampler2D sLD0 { Texture = tLD0; FILTER(POINT); };
+	texture2D tLD1 { DIVRES(2); Format = R16; };
+	sampler2D sLD1 { Texture = tLD1; FILTER(POINT); };
+	texture2D tLD2 { DIVRES(4); Format = R16; };
+	sampler2D sLD2 { Texture = tLD2; FILTER(POINT); };
+	texture2D tLD3 { DIVRES(8); Format = R16; };
+	sampler2D sLD3 { Texture = tLD3; FILTER(POINT); };
+	
 	
 	texture2D tLevel1 { DIVRES((4 * DIV_LEV)); Format = LFORM; };
 	sampler2D sLevel1 { Texture = tLevel1; FILTER(LFILT); WRAPMODE(FWRAP); };
@@ -300,6 +311,7 @@ namespace FrameWork {
 	{
 		vpos = (vpos) * div;
 		float acc;
+		[loop]
 		for(int i; i < BLOCK_POS_CT; i++)
 		{
 			int2 np = UBLOCK[i];
@@ -322,6 +334,7 @@ namespace FrameWork {
 	float BlockErr(float Block0[BLOCK_POS_CT], float Block1[BLOCK_POS_CT])
 	{
 		float ssd; float norm;
+		[loop]
 		for(int i; i < BLOCK_POS_CT; i++)
 		{
 			float t = (Block0[i] - Block1[i]);
@@ -334,22 +347,40 @@ namespace FrameWork {
 	}
 	
 
-	float3 HueToRGB(float hue)
+	float3 VecToCol(float2 v)
 	{
-	    float3 fr = frac(hue.xxx + float3(0.0, -1.0/3.0, 1.0/3.0));
-	    return 3.0 * abs(1.0 - 2.0*fr) - 1.0;
-	}
-		
-	float3 MVtoRGB( float2 MV )
-	{
-		float3 col = HueToRGB(atan2(MV.y, MV.x) / 6.28);
-		if(any(isnan(col))) return 0.7152;
-		float lmv = length(MV);
-		
-		return lerp(0.7152, col, lmv );
+	    float rad = length(v);
+	    float a = atan2(-v.y, -v.x) / 3.14159265;
 	
-	}
+	    float fk = (a + 1.0) / 2.0 * 6.0;
+	    int k0 = fk % 7;
+	    int k1 = (k0 + 1) % 7;
+	    float f = fk - k0;
 	
+	    float3 cols[7] = {
+	        float3(1, 0, 0),
+	        float3(1, 1, 0),
+	        float3(0, 1, 0),
+	        float3(0, 1, 1),
+	        float3(0, 0, 1),
+	        float3(1, 0, 1),
+	        float3(1, 0, 0),
+			};
+	
+	    float3 col0 = cols[k0];
+	    float3 col1 = cols[k1];
+	
+	    float3 col = lerp(col0, col1, frac(f));
+	    //col = tex2D(sMotGrad, float2(0.5 * a, 0.0)).rgb;
+	    
+	    float j = 0.666667 * rad;
+	    float k = rad / (rad + 0.5);
+	    float l = saturate(rad*rad);
+		l = lerp(j,k,l);
+		
+	    
+	    return any(isnan(col)) ? 0.0 : lerp(0.0, col, saturate(l));
+	}
 	
 	
 	float4 CalcMVL(sampler2D cur, sampler2D pre, int2 pos, float4 off, int RAD, bool reject)
@@ -363,10 +394,11 @@ namespace FrameWork {
 		float2 noff = off.xy;
 		
 		float Err = BlockErr(cBlock, sBlock);
-
+		[loop]
 		for(int q = 0; q <= MOT_QUALITY; q++)
 		{
 			float exm = exp2(-q);
+			[loop]
 			for(int i = -RAD; i <= RAD; i++) for(int ii = -RAD; ii <= RAD; ii++)
 			{
 				if(Err < 0.01) break;
@@ -490,7 +522,7 @@ namespace FrameWork {
 		
 		float Err = BlockErr(cBlock, sBlock);
 		float4 MV = tex2DfetchLin(tex, 0.5 * vpos);
-		
+		[loop]
 		for(int i = 1; i <= 1; i++) for(int ii; ii < 5; ii++)
 		{
 			float4 samMV = 2.0 * tex2DfetchLin(tex, 2 * i * ioff[ii] + 0.5 * vpos);
@@ -544,6 +576,17 @@ namespace FrameWork {
 		
 		return lum;//float2(lum, dep).xy; 
 	}
+	
+	float minGather(sampler2D tex, float2 xy)
+	{
+		float4 g = tex2DgatherR(tex, xy);
+		return min( min(g.x,g.y), min(g.z,g.w) );
+	}
+	float DD0PS(PS_INPUTS) : SV_Target { return GetDepth(xy); };
+	float DD1PS(PS_INPUTS) : SV_Target { return minGather(sLD0, xy); };
+	float DD2PS(PS_INPUTS) : SV_Target { return minGather(sLD1, xy); };
+	float DD3PS(PS_INPUTS) : SV_Target { return minGather(sLD2, xy); };
+	
 	float2 Gauss1PS(PS_INPUTS) : SV_Target { return DUSample(sCG0, xy, 2.0).x; }
 	float2 Gauss2PS(PS_INPUTS) : SV_Target { return DUSample(sCG1, xy, 4.0).x; }
 	float2 Gauss3PS(PS_INPUTS) : SV_Target { return DUSample(sCG2, xy, 8.0).x; }
@@ -660,8 +703,33 @@ namespace FrameWork {
 		return float4(med.rgb, med.a);
 	}
 	
-	float4 FloodAPS(PS_INPUTS) : SV_Target { return Median9(sLevel0, xy); }
-	float4 FloodBPS(PS_INPUTS) : SV_Target { return Median9(sTemp1M, xy); }
+	float4 Filter8(sampler2D tex, float2 xy, float level)
+	{
+		float cenD = tex2Dlod(sLD3, float4(xy,0,0)).x;
+		
+		float2 its = exp2(level) * 8.0 * rcp(RES);
+		
+		float4 acc; float accw;
+		
+		for(int i = -1; i <= 1; i++) for(int j = -1; j <= 1; j++)
+		{
+			float2 nxy = xy + float2(i,j) * its;
+			
+			float samD = tex2Dlod(sLD3, float4(nxy,0,0)).x;
+			float w = exp( -30.0 * abs(cenD - samD) / (cenD + 1e-10)) + 1e-10;
+			
+			float4 sam = tex2Dlod(tex, float4(nxy,0,0));
+			
+			acc += sam * w;
+			accw += w;
+		}
+		return acc / accw;
+	}
+	
+	float4 Flood0PS(PS_INPUTS) : SV_Target { return Median9(sLevel0, xy); }
+	float4 Flood1PS(PS_INPUTS) : SV_Target { return Filter8(sTemp1M, xy, 2.0); }
+	float4 Flood2PS(PS_INPUTS) : SV_Target { return Filter8(sTemp0M, xy, 1.0); }
+	float4 Flood3PS(PS_INPUTS) : SV_Target { return Filter8(sTemp1M, xy, 0.0); }
 	
 	//=======================================================================================
 	//Blending
@@ -692,25 +760,28 @@ namespace FrameWork {
 	float4 SmoothMV1(PS_INPUTS) : SV_Target { return FilterMVAtrous(sTemp0, xy, 1.0); }
 	float4 SmoothMV0(PS_INPUTS) : SV_Target { return FilterMVAtrous(sTemp1, xy, 0.0); }
 	
+	
 	float4 UpscaleMVI0(PS_INPUTS) : SV_Target
 	{
+		/*
 		//large offset since median sampling, helps quite a bit at finding good candidates
-		float2 mult = 4.0 * rcp(tex2Dsize(sTemp0M));
-		float cenD = GetDepth(xy);
+		float2 mult = 1.0 * rcp(tex2Dsize(sTemp0));
+		float cenD = tex2Dlod(sLD2, float4(xy,0,0)).x;
 		
 		float4 cenC = tex2DgatherR(sCG0, xy);
 		
 		float4 cd;
-		float err = 1.0;
+		float err = 100.0;
+		float4 acc; float accw;
 		
 		for(int i=0; i <5; i++)
 		{
 			float2 nxy = xy + mult * (ioff[i]);
-			float4 sam = Median5(sTemp0M, float4(nxy,0,0).xy);
-			//float samD = tex2D(sMaxD, nxy).x;
+			float4 sam = tex2Dlod(sTemp0, float4(nxy,0,0));
 			
+			float samD = tex2Dlod(sLD3, float4(nxy,0,0)).x;
 			float4 samC = tex2DgatherR(sPG0, xy + sam.xy / RES);
-			float tErr = distance(cenC, samC);
+			float tErr = abs(cenD - samD);//(cenC, samC);
 			
 			[flatten]
 			if(tErr < err)
@@ -720,23 +791,45 @@ namespace FrameWork {
 			}
 		}
 		return cd;
+		*/
+		
+		float cenD = tex2Dlod(sLD2, float4(xy,0,0)).x;
+		
+		float2 its = 8.0 * rcp(RES);
+		
+		float4 acc; float accw;
+		
+		for(int i = -1; i <= 1; i++) for(int j = -1; j <= 1; j++)
+		{
+			float2 nxy = xy + float2(i,j) * its;
+			
+			float samD = tex2Dlod(sLD3, float4(nxy,0,0)).x;
+			float w = exp( -50.0 * abs(cenD - samD) / (cenD + 1e-10)) + 1e-10;
+			
+			float4 sam = tex2Dlod(sTemp0M, float4(nxy,0,0));
+			
+			acc += sam * w;
+			accw += w;
+		}
+		return acc / accw;
 	}
 	
 	float4 UpscaleMVI(PS_INPUTS) : SV_Target
 	{
+		/*
 		//large offset since median sampling, helps quite a bit at finding good candidates
-		float2 mult = 2.0 * rcp(tex2Dsize(sQuar));
+		float2 mult = 1.0 * rcp(tex2Dsize(sQuar));
 		float cenD = GetDepth(xy);
 		//not as robust as multiple points, but it should be within a single pixel by now
-		float3 cenC = GetBackBuffer(xy);
+		float3 cenC = nBackBuffer(xy);
 		
 		float4 cd;
-		float err = 10.0;
+		float err = 100.0;
 		
 		for(int i=0; i <5; i++)
 		{
 			float2 nxy = xy + mult * (ioff[i]);
-			float4 sam = Median5(sQuar, float4(nxy,0,0).xy);
+			float4 sam = tex2Dlod(sQuar, float4(nxy,0,0));
 			//float samD = tex2D(sMaxD, nxy).x;
 			
 			float3 samC = tex2D(sPreFrm, xy + sam.xy / RES).rgb;
@@ -750,22 +843,44 @@ namespace FrameWork {
 			}
 		}
 		return cd;
+		*/
+		
+		float cenD = tex2Dlod(sLD1, float4(xy,0,0)).x;
+		
+		float2 its = 4.0 * rcp(RES);
+		
+		float4 acc; float accw;
+		
+		for(int i = -1; i <= 1; i++) for(int j = -1; j <= 1; j++)
+		{
+			float2 nxy = xy + float2(i,j) * its;
+			
+			float samD = tex2Dlod(sLD2, float4(nxy,0,0)).x;
+			float w = exp( -50.0 * abs(cenD - samD) / (cenD + 1e-10)) + 1e-10;
+			
+			float4 sam = tex2Dlod(sQuar, float4(nxy,0,0));
+			
+			acc += sam * w;
+			accw += w;
+		}
+		return acc / accw;
 	}
 	
 	float4 UpscaleMV(PS_INPUTS) : SV_Target
 	{
+		/*
 		float2 mult = 1.0 * rcp(tex2Dsize(sHalf));
 		float cenD = GetDepth(xy);
 		
-		float3 cenC = GetBackBuffer(xy);
+		float3 cenC = nBackBuffer(xy);
 		
 		float4 cd;
-		float err = 10.0;
+		float err = 100.0;
 		
 		for(int i=0; i <5; i++)
 		{
 			float2 nxy = xy + mult * (ioff[i]);
-			float4 sam = Median5(sHalf, float4(nxy,0,0).xy);
+			float4 sam = tex2Dlod(sHalf, float4(nxy,0,0));
 			//float samD = tex2D(sMaxD, nxy).x;
 			
 			float3 samC = tex2D(sPreFrm, xy + sam.xy / RES).rgb;
@@ -779,9 +894,28 @@ namespace FrameWork {
 			}	
 		}
 		return float4(cd.xy, err, 1.0);
+		*/
+		
+		float cenD = tex2Dlod(sLD0, float4(xy,0,0)).x;
+		
+		float2 its = 2.0 * rcp(RES);
+		
+		float4 acc; float accw;
+		
+		for(int i = -1; i <= 1; i++) for(int j = -1; j <= 1; j++)
+		{
+			float2 nxy = xy + float2(i,j) * its;
+			
+			float samD = tex2Dlod(sLD1, float4(nxy,0,0)).x;
+			float w = exp( -50.0 * abs(cenD - samD) / (cenD + 1e-10)) + 1e-10;
+			
+			float4 sam = tex2Dlod(sHalf, float4(nxy,0,0));
+			
+			acc += sam * w;
+			accw += w;
+		}
+		return acc / accw;
 	}
-	
-
 	//=======================================================================================
 	//Albedo
 	//=======================================================================================
@@ -926,7 +1060,7 @@ namespace FrameWork {
 			
 			float w = dot(cenN, samN) > 0.8 + 0.19 * (level / (level + 1.0));
 			//w *= dot(cenN, samN) < 0.9999;
-			w *= exp(-10.0 * abs(cenD - samD) / (cenD + 0.001));
+			w *= exp(-10.0 * abs(cenD - samD) / (cenD + 0.01));
 			acc += w * float4(samN, 1.0);
 		}
 		return acc.w > 0.01 ? normalize(acc.xyz) : cenN;
@@ -1006,7 +1140,7 @@ namespace FrameWork {
 		float3 cenP = NorEyePos(xy);
 		float cenpL2 = dot(cenP, cenP);
 		//float cenD = GetDepth(xy);
-		float3 texN;
+		float3 texN; float tacc;
 		for(int i = -1; i <= 1; i++) for(int ii = -1; ii <= 1; ii++)
 		{
 			float2 nxy = xy + float2(i,ii) / RES;
@@ -1015,7 +1149,8 @@ namespace FrameWork {
 			float3 samP = NorEyePos(nxy);
 			//float samD = GetDepth(nxy);
 			float w = exp(-FARPLANE * distance(cenP, samP) / (cenpL2 + exp(-32) ));
-			texN += float3(-i,-ii, 1.0 / w) * lerp(sLum.x, samL.w, 0.9);
+			texN += float3(-i,-ii, 1.0 / w) * lerp(sLum.x, samL.w, 0.8);
+			tacc += samL.w;
 		}
 		texN.xy /= texN.z + 1.0;
 		texN = normalize(float3(texN.xy, 2.5 * pow(1.0 - 0.75 * TEXTURE_INTENSITY, 4.0) ) );
@@ -1062,7 +1197,7 @@ namespace FrameWork {
 		float M0 = dot(c, rcp(3.0));
 		float M1 = dot(c*c, rcp(3.0));
 		
-		float clum = GetLuminance(GetBackBuffer(xy));
+		float clum = GetLuminance(col.rgb);
 		
 		float blum = 1000.0;
 		float err = 1.0;
@@ -1071,25 +1206,26 @@ namespace FrameWork {
 		{
 			float2 nxy = xy + its * (ioff[i]);
 			float tlum = tex2D(sTemp0, nxy).x;
-						
+			float3 tcol = GetBackBuffer(nxy);			
+			
 			[flatten]
-			if(abs(clum - tlum) < err)
+			if(dot(abs(col.rgb - tcol),0.33334) < err)
 			{
 				blum = tlum;
-				err = abs(clum-tlum);
+				err = dot(abs(col.rgb - tcol),0.33334);//abs(clum-tlum);
 			}
 		}
 		
 		
 		col.a = blum;
 		
-		albedo = pow(0.5 * pow(col,2.2) / (3.0*blum + 0.05), rcp(2.2));
-		albedo.rgb *= 0.5 + 2.0 * (abs(M0-M1) );
+		albedo = pow(0.5 * pow(col,2.2) / (3.0*blum + 0.01), rcp(2.2));
+		albedo.rgb *= 0.5 + 1.5 * (abs(M0-M1) / (M0 + M1 + 0.1) );
 		
 		
 		
 		float lum = GetLuminance(pow(col.rgb,2.2));
-		roughness = saturate(0.33334 * blum / (lum + 0.001) - 0.18);
+		roughness = saturate(0.33334 * blum / (lum + 0.0001) - 0.18);
 	}
 	
 	float4 SaveMVPS(PS_INPUTS) : SV_Target
@@ -1114,12 +1250,33 @@ namespace FrameWork {
 		//float fd = dot(normalize(GetEyePos(xy, 1.0)), -GetNormal(xy));
 
 		float2 backV = tex2D(sFull, xy + MV.xy / RES).xy;
+		cenD = GetDepth(xy + MV.xy / RES);
+		for(int i=0; i <5; i++)
+		{
+			float2 nxy = xy + its * (ioff[i]) + MV.xy / RES;
+			float samD = GetDepth(nxy).x;
+			float3 samMV = tex2D(sFull, nxy).xyz;
+			
+			[flatten]
+			if(samD < cenD)
+			{
+				cenD = samD;
+				backV = samMV.xy;
+			}
+		}
+		
+		
 		float doc = rcp(length(MV.xy - backV) / length(MV.xy) + 1.0);// < 0.125 * (length(MV.xy) + 1.0) / fd;
 		doc = all(abs(MV.xy) < 1.0) ? 1.0 : doc; 
-		
+		doc *= all(abs(xy+MV.xy/RES - 0.5) <= 0.5);
+		//doc = doc * doc * doc * (doc * (6.0 * doc - 15.0) + 10.0);
+		//doc = doc * doc * doc * (doc * (6.0 * doc - 15.0) + 10.0);
+		doc = doc > 0.9;//smoothstep(0,1,doc);
+		//doc = smoothstep(0,1,doc);
+		//doc = smoothstep(0,1,doc);
 		
 		MV.xy /= 1.0 + _SUBPIXEL_FLOW;
-		MV.xy = any(abs(MV.xy) > 0.0001) ? MV.xy / RES : 0.0;
+		MV.xy = any(abs(MV.xy) > 0.00000001) ? MV.xy / RES : 0.0;
 		
 		return float4(MV.xy, doc, 1.0);
 	}
@@ -1153,7 +1310,7 @@ namespace FrameWork {
 	float3 BlendPS(PS_INPUTS) : SV_Target
 	{
 		float dither = (IGN(vpos.xy) - 0.5) * exp2(-8);
-		float2 MV = 80.0 * normalize(RES) * GetVelocity(xy).xy;
+		float2 MV = GetVelocity(xy).xy;
 		
 		if(DEBUG == 3) return pow(GetAlbedo(xy), rcp(2.2));
 		
@@ -1167,7 +1324,7 @@ namespace FrameWork {
 		float3 depCol = lerp(lerp( float3(1.0,0.7,0.0), float3(0.4,0.0,0.4), saturate(2.0 * sqrt(dep)) ), 0.0, saturate(2.0*sqrt(dep)-1.0));
 		if(DEBUG == 2) return dither + depCol;
 		//if(DEBUG == 2) return round(frac(0.25*NorEyePos(xy).xyz));;
-		if(DEBUG == 1) return MVtoRGB(MV / (abs(MV) + 1.0) );
+		if(DEBUG == 1) return VecToCol(RES * MV / FRAME_TIME);
 		if(DEBUG == 5) return GetRoughness(xy);
 		return GetBackBuffer(xy);
 	}
@@ -1191,6 +1348,11 @@ namespace FrameWork {
 		pass {	PASS1(Gauss4PS, tCG4); }
 		pass {	PASS1(Gauss5PS, tCG5); }
 	
+		pass {	PASS1(DD0PS, tLD0); }
+		pass {	PASS1(DD1PS, tLD1); }
+		pass {	PASS1(DD2PS, tLD2); }
+		pass {	PASS1(DD3PS, tLD3); }
+	
 		//optical flow
 		pass {	PASS1(Level5PS, tLevel5); }
 		pass {	PASS1(Level4PS, tLevel4); }
@@ -1199,8 +1361,10 @@ namespace FrameWork {
 		pass {	PASS1(Level1PS, tLevel1); }
 		pass {	PASS1(Level0PS, tLevel0); }	
 		
-		pass {	PASS1(FloodAPS, tTemp1M); }
-		pass {	PASS1(FloodBPS, tTemp0M); }	
+		pass {	PASS1(Flood0PS, tTemp1M); }
+		pass {	PASS1(Flood1PS, tTemp0M); }	
+		pass {	PASS1(Flood2PS, tTemp1M); }	
+		pass {	PASS1(Flood3PS, tTemp0M); }	
 		
 		pass {	PASS1(UpscaleMVI0, tQuar); }	
 		pass {	PASS1(UpscaleMVI, tHalf); }	
