@@ -366,7 +366,7 @@ namespace ZenMotion {
 	
 	float3 VecToCol(float2 v)
 	{
-	    float rad = length(v);
+	    float rad = (length(v));
 	    float a = atan2(-v.y, -v.x) / 3.14159265;
 	
 	    float fk = (a + 1.0) / 2.0 * 6.0;
@@ -796,8 +796,12 @@ namespace ZenMotion {
 	float4 Filter8(sampler2D tex, float2 xy, float level)
 	{
 		float cenD = tex2Dlod(sLD3, float4(xy,0,0)).x;
+		//float2 cenV = tex2Dlod(tex, float4(xy,0,0)).xy;
 		
-		float2 its = exp2(level) * 8.0 * rcp(RES);
+		float b = fwidth(cenD);
+		
+		float m = exp2(level);
+		float2 its = m * 8.0 * rcp(RES);
 		
 		float4 acc; float accw;
 		
@@ -806,9 +810,11 @@ namespace ZenMotion {
 			float2 nxy = xy + float2(i,j) * its;
 			
 			float samD = tex2Dlod(sLD3, float4(nxy,0,0)).x;
-			float w = exp( -30.0 * abs(cenD - samD) / (cenD + 1e-10)) + 1e-10;
+			float w = exp( -5.0 * abs(cenD - samD) / (b + 0.001)) + 1e-10;
 			
 			float4 sam = tex2Dlod(tex, float4(nxy,0,0));
+			
+			//w *= pow(saturate(dot(normalize(cenV),normalize(sam.xy))), 4.0);
 			
 			acc += sam * w;
 			accw += w;
@@ -816,7 +822,7 @@ namespace ZenMotion {
 		return acc / accw;
 	}
 	
-	float4 Flood0PS(PS_INPUTS) : SV_Target { return Median9(sLevel0, xy); }
+	float4 Flood0PS(PS_INPUTS) : SV_Target { return Filter8(sLevel0, xy, 0.0); }
 	float4 Flood1PS(PS_INPUTS) : SV_Target { return Filter8(sTemp1, xy, 2.0); }
 	float4 Flood2PS(PS_INPUTS) : SV_Target { return Filter8(sTemp0, xy, 1.0); }
 	float4 Flood3PS(PS_INPUTS) : SV_Target { return Filter8(sTemp1, xy, 0.0); }
@@ -863,7 +869,7 @@ namespace ZenMotion {
 		
 		float cenD = tex2Dlod(sLD2, float4(xy,0,0)).x;
 		
-		float2 its = 8.0 * rcp(RES);
+		float2 its = 16.0 * rcp(RES);
 		
 		float4 acc; float accw;
 		
@@ -872,7 +878,7 @@ namespace ZenMotion {
 			float2 nxy = xy + float2(i,j) * its;
 			
 			float samD = tex2Dlod(sLD3, float4(nxy,0,0)).x;
-			float w = exp( -50.0 * abs(cenD - samD) / (cenD + 1e-10)) + 1e-10;
+			float w = exp( -100.0 * abs(cenD - samD) / (cenD + 1e-10)) + 1e-10;
 			
 			float4 sam = tex2Dlod(sTemp0, float4(nxy,0,0));
 			
@@ -1024,6 +1030,8 @@ namespace ZenMotion {
 		//MV = tex2D(sTemp0, xy).xy / RES;
 		//MV *= (RES);
 		MV *= rcp(FRAME_TIME);
+		float d = GetDepth(xy);
+		MV *= d == 1.0 ? 0.0 : 1.0;
 		//MV *= 0.5;
 		MV.y *= -1.0;
 		//MV *=  (FRAME_COUNT % 2) == 0 ? 1.0 : -1.0;
