@@ -14,6 +14,8 @@
 #define CS_INPUTS uint3 id : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID
 #define DIV_RND_UP(a, b) ((int(a)+int(b)-1)/int(b))
 #define DISPATCH_RES(X, Y, DIS_RES_DIV) DispatchSizeX = DIV_RND_UP(RES.x, X * DIS_RES_DIV); DispatchSizeY = DIV_RND_UP(RES.y, Y * DIS_RES_DIV)
+
+
 #define DIVRES_DEP(DIVRES_RIV, DEP) Width = DIV_RND_UP(RES.x, DIVRES_RIV); Height = DIV_RND_UP(RES.y, DIVRES_RIV); Depth = DEP
 #define DIVRES(DIVRES_RIV) Width = DIV_RND_UP(RES.x, DIVRES_RIV); Height = DIV_RND_UP(RES.y, DIVRES_RIV)
 #define DIVRES_N(DIVRES_RIV, NRES) Width = DIV_RND_UP(NRES.x, DIVRES_RIV); Height = DIV_RND_UP(NRES.y, DIVRES_RIV)
@@ -35,7 +37,7 @@
 namespace zfw {
 	texture2D tNormal { DIVRES(1); Format = RG16; MipLevels = 7; };
 	sampler2D sNormal { Texture = tNormal; FILTER(POINT); };
-	texture2D tAlbedo { DIVRES(1); Format = RGBA8; };
+	texture2D tAlbedo { DIVRES(1); Format = RGBA16; };
 	sampler2D sAlbedo { Texture = tAlbedo; };
 	texture2D tRoughness { DIVRES(1); Format = R8; };
 	sampler2D sRoughness { Texture = tRoughness; };
@@ -64,7 +66,7 @@ float GetDepth(float2 xy)
 }
 
 
-#define FOV (1.0 * 0.0174533 * 90.0)
+#define FOV (1.0 * 0.0174533 * 70.0)
 #define fl rcp(tan(0.5 * FOV))
 
 float3 GetEyePos(float2 xy, float z)
@@ -189,11 +191,6 @@ float3 GetBackBuffer(float2 xy)
 	//return tex2D(Zenteon::sTest, xy).rgb;
 }
 
-float3 GetAlbedo(float2 xy)
-{
-	return pow(tex2D(zfw::sAlbedo, xy).rgb, 2.2);
-}
-
 
 //===================================================================================
 //Functions
@@ -204,24 +201,50 @@ float GetLuminance( float3 x)
 	return 0.2126 * x.r + 0.7152 * x.g + 0.0722 * x.b;
 }	
 
+float nll(float3 x)
+{
+	x = exp(x + 1.0);
+	//x.x = max(dot(x.x, rcp(3)),1.0);
+	return saturate(log(x.z));
+}
+
 float3 ReinJ(float3 x, float HDR_RED, bool bypass, bool forceLinear)
 {
 	if(bypass) return max( pow(x, 1.0 / (1.0 + 1.2 * forceLinear) ), 0.001);
-	float l = dot(x, float3(0.2126, 0.7152,0.0722));
+	
+	float wp = log2(rcp(HDR_RED - 1.0) + 1.0);//rcp(HDR_RED - 1.0);
+	x = log2(x + 1.0) / wp;
+	/*
+	float l = dot(x,0.33334);// max(x.r, max(x.g,x.b));//dot(x, float3(0.2126, 0.7152,0.0722));
 	x /= l + 0.0001;
 	return pow(x * HDR_RED * l / (l + 1.0), rcp(2.2));
+	*/
+	return pow(saturate(x), rcp(2.2));
 }
 
 float3 IReinJ(float3 x, float HDR_RED, bool bypass, bool forceLinear)
 {
 	if(bypass) return max( pow(x, 1.0 + 1.2 * forceLinear), 0.001);
 	x = pow(x, 2.2);
+	float wp = log2(rcp(HDR_RED - 1.0) + 1.0);
 	
-	float l = dot(x, float3(0.2126, 0.7152,0.0722));
+	return exp2(x * wp) - 1.0;
+	
+	/*
+	float l = dot(x,0.33334);//max(x.r, max(x.g,x.b));
+	//float l = dot(x, float3(0.2126, 0.7152,0.0722));
 	x /= l + 0.0001;
 	return  max(x * -l / (l - HDR_RED), 0.0000001);
-
+	*/
 }
+
+//Dependent on ITMO
+float3 GetAlbedo(float2 xy)
+{
+	return IReinJ(tex2D(zfw::sAlbedo, xy).rgb, HDR);
+}
+
+//
 
 float CalcDiffuse(float3 pos0, float3 nor0, float3 pos1, float3 nor1, float backface)
 {
