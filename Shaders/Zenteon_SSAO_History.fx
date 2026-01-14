@@ -185,7 +185,8 @@ namespace SSAO_HISTORY {
 	{
 		return dot(a, b) * rsqrt(dot(a, a));
 	}
-	
+
+	//https://stackoverflow.com/questions/3380628/fast-arc-cos-algorithm
 	float2 FastAcos2(float2 x) {
 	   return (-0.69813170*x*x - 0.87266463)*x + 1.57079633;
 	}
