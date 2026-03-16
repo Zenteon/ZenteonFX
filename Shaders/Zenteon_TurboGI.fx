@@ -39,6 +39,8 @@ uniform float INTENSITY <
 	ui_label = "GI Intensity";
 	ui_min = 0.0;
 	ui_max = 5.0;
+	ui_category = "\n Global \n\n";
+	ui_category_closed = true;
 > = 1.0;
 
 uniform float AO_INTENSITY <
@@ -46,6 +48,8 @@ uniform float AO_INTENSITY <
 	ui_max = 1.0;
 	ui_type = "drag";
 	ui_label = "AO Intensity";
+	ui_category = "\n Global \n\n";
+	ui_category_closed = true;
 > = 0.8;
 
 uniform float RAY_LENGTH <
@@ -53,11 +57,43 @@ uniform float RAY_LENGTH <
 	ui_max = 1.0;
 	ui_type = "drag";
 	ui_label = "Ray Length";
+	ui_category = "\n Global \n\n";
+	ui_category_closed = true;
 > = 1.0;
+
+uniform float AMBIENT_LEVEL <
+	ui_type = "drag";
+	ui_min = 0.5;
+	ui_max = 3.0;
+	ui_label = "Light Level";
+	ui_category = "\n Enviroment \n\n";
+	ui_category_closed = true;
+> = 1.5;
+
+uniform float3 AMBIENT_COL <
+	ui_min = 0.1;
+	ui_max = 1.0;
+	ui_type = "color";
+	ui_label = "Light Color";
+	ui_category = "\n Enviroment \n\n";
+	ui_category_closed = true;
+> = float3(0.8,0.9,1.0);
+
+uniform float FADEOUT <
+	ui_type = "drag";
+	ui_min = 0.0;
+	ui_max = 1.0;
+	ui_category = "\n Enviroment \n\n";
+	ui_category_closed = true;
+	ui_label = "Fadeout";
+> = 0.6;
 
 uniform int DEBUG <
 	ui_type = "combo";
+	ui_label = "Debug";
 	ui_items = "None\0GI\0AO\0";
+	ui_category = "\n Extra \n\n";
+	ui_category_closed = true;
 > = 0;
 
 #if USE_FRAMEWORK
@@ -67,7 +103,8 @@ uniform int DEBUG <
 		ui_label = "Zenteon: Motion Compatibility";
 		ui_tooltip = "Enable ONLY IF USING Zenteon: Motion, reduces flickering almost completely.\n"
 		"WILL INCRESE NOISE IF OTHER MOTION VECTORS ARE USED";
-	
+		ui_category = "\n Extra \n\n";
+		ui_category_closed = true;
 	> = 0;
 #endif
 
@@ -220,6 +257,22 @@ namespace ZenTGI_4 {
 	  return n < 0.5 ? 2.0 * n : 2.0 - 2.0 * n;
 	}
 	
+	float BrdfSH(float4 sh, float3 normal)
+	{
+	    if(sh.x < 1e-10) return sh.x;
+	    float t = dot(normalize(sh.yzw), normal.yzx);
+	    
+	    float tl = saturate(length(sh.yzw) / (1.73205081 * sh.x));
+	    
+	    float l0 = lerp(0.25 + 0.25 * t, max(t, 0.0), 2.0 * clamp(tl-0.5, 0.0, 0.5));
+	    float l1 = lerp(0.0,   0.25 - 0.25 * t,       2.0 * clamp(0.5-tl, 0.0, 0.5));
+	    
+	    l0 *= l0;
+	    l1 *= l1;
+	    
+	    return max(sh.x * 3.54490509 * (l0 + l1), 0.0);
+	}
+	
 	float3 NormalOverride(float2 uv, float mip)
 	{
 		return NormalDecode(tex2Dlod(sNormal, float4(uv,0,mip)).xy);
@@ -338,9 +391,17 @@ namespace ZenTGI_4 {
 	{
 		float3 albedo = Albedont(xy);
 		float3 c = GetBackBuffer(xy);
-		float3 col = c * c / (GetLuminance(c*c) + 0.001);
-		
+	
 		c = IReinJ(c, 1.1, 0, 0);
+		
+		float2 mv = OverrideVelocity(xy, 1.0).xy;
+		float4 GIBasis = tex2D(sSHF, xy + mv);
+		float3 GICol = tex2D(sColF, xy + mv).rgb;
+		float3 N = NormalOverride(xy, 0.0);
+		float3 GI = GICol * BrdfSH(GIBasis, N);
+		
+		c += 3.0 * GI * albedo;
+		c *= exp(-GetDepth(xy) / (0.001 + FADEOUT * FADEOUT));
 		
 		return float4(c, 1.0);
 	}
@@ -507,7 +568,7 @@ namespace ZenTGI_4 {
 			float4 samC = tex2Dlod(sCol1, float4(nxy,0,0));
 			float samD = tex2Dlod(sDep, float4(nxy,0,0)).x;
 			float3 samN = NormalOverride(nxy, 2.0);
-			float w = fastExpN( 30.0 * abs(cenD - samD) / (cenD + 0.0001) );
+			float w = fastExpN( 100.0 * abs(cenD - samD) / (cenD + 0.0001) );
 			w *= pow(saturate(dot(samN, cenN)), 4.0);
 			
 			//w *= fastExpN( 4.0 * abs(samSH.x - M) / (std + 0.1) );
@@ -539,7 +600,7 @@ namespace ZenTGI_4 {
 			float4 samSH = tex2Dlod(sSH0, float4(nxy,0,0));
 			float4 samC = tex2Dlod(sCol0, float4(nxy,0,0));
 			float samD = tex2Dlod(sDep, float4(nxy,0,0)).x;
-			float w = fastExpN( 30.0 * abs(cenD - samD) / (cenD + 0.0001) );
+			float w = fastExpN( 100.0 * abs(cenD - samD) / (cenD + 0.0001) );
 			
 			shLum += samSH * w;
 			shCol += samC * w;
@@ -593,77 +654,38 @@ namespace ZenTGI_4 {
 		return sh;
 	}
 	
-	float BrdfSH(float4 sh, float3 normal)
-	{
-	    if(sh.x < 1e-10) return sh.x;
-	    float t = dot(normalize(sh.yzw), normal.yzx);
-	    
-	    float tl = saturate(length(sh.yzw) / (1.73205081 * sh.x));
-	    
-	    float l0 = lerp(0.25 + 0.25 * t, max(t, 0.0), 2.0 * clamp(tl-0.5, 0.0, 0.5));
-	    float l1 = lerp(0.0,   0.25 - 0.25 * t,       2.0 * clamp(0.5-tl, 0.0, 0.5));
-	    
-	    l0 *= l0;
-	    l1 *= l1;
-	    
-	    return max(sh.x * 3.54490509 * (l0 + l1), 0.0);
-	}
-	
 	float3 BlendPS(PS_INPUTS) : SV_Target
 	{
-		/*
-		xy = (floor(xy * RES * RES_FIN) + 0.5) / (RES * RES_FIN);
-		float3 normal = 2f * tex2Dlod(sNormal, float4(xy,0,0)).xyz - 1f;
-		
-		float4 Nbasis = GetSH(normal);
-		float4 GIbasis = tex2D(sSHF, xy );
-		GIbasis = ClampSH(GIbasis);
-		//6.28 * GIbasis.x;//
-		float4 GICol = tex2D(sColF, xy );
-		float rad = dot(float4(3.14159, 2.59439.xxx) * GIbasis, float4(3.14159, 2.59439.xxx) * Nbasis);
-		
-		float3 c = IReinJ(GetBackBuffer(xy), HDR);
-		float3 alb = Albedont(xy);
-		if(DEBUG) {
-			c = 0.05;
-			alb = 1.0;
-		}
-		float dither = (GRnoise3(vpos.xy) - 0.5) * exp2(-8);
-		//return ReinJ(0.05 * GICol.a + GICol.a * GICol.rgb * rad, HDR);		
-		return dither + ReinJ(
-			lerp(1.0, GICol.a, AO_INTENSITY) * c +
-			INTENSITY * alb * GICol.a * GICol.rgb * rad,
-		 HDR);
-		 */
-		
 		#if USE_FRAMEWORK 
 			float3 normal = GetNormal(xy);
 		#else
-			float3 normal = NormalOverride(xy, 0.0);//2f * tex2Dlod(sNormal, float4(xy,0,0)).xyz - 1f;
+			float3 normal = NormalOverride(xy, 0.0);
 		#endif
 		
 		float4 GIbasis = tex2D(sSHF, xy );
 		float3 GICol = tex2D(sColF, xy ).rgb;
-		float  AO	= GICol.x;//dot(GICol, float3(0.2126,0.7152,0.0722));
+		float  AO	= GICol.x;
 		
-		GICol.rgb = NormalDecode(GICol.yz);//CoCgtoRGB(GICol.yz, GIbasis.x / (GIbasis.x + 1.0) );s
-		//GICol.rgb /= dot(GICol.rgb, float3(0.2126,0.7152,0.0722));
+		GICol.rgb = NormalDecode(GICol.yz);
+	
+		
+		if(!DEBUG)
+		{
+			GICol.r = dot(GICol.rgb, float3(0.721397,0.265387,0.013216));
+			GICol.g = dot(GICol.rgb, float3(0.211942,0.576117,0.211942));
+			GICol.b = dot(GICol.rgb, float3(0.013216,0.265387,0.721397));
+		}
 		
 		GICol /= AO;
-		float3 GI = 3.0 * 3.14159 * GICol * BrdfSH(GIbasis, normal);
-		//GI = exp2(GI) - 1.0;
-		//return AO;
-		//return ReinJ(GI, HDR);// * 0.02 + GI, HDR);
+		float3 GI = 2.0 * 3.14159 * GICol * BrdfSH(GIbasis, normal);
 		
-		//return ReinJ(GICol.a + GICol.rgb*rad, HDR);
-		//return pow(GICol.a, rcp(2.2));
-		//return GetBackBuffer(xy);
 		float3 c = GetBackBuffer(xy);
-		//float l = dot(c, 0.333);
-		//c.xy = RGBtoCoCg(c);
-		//c = CoCgtoRGB(c.xy, l);
-		
 		c = IReinJ(c, HDR);
+		
+			
+		float F = exp(-GetDepth(xy) / (0.001 + FADEOUT * FADEOUT));
+		GI *= F;
+		AO = lerp(1.0, AO, F);
 		
 		float3 alb = Albedont(xy);
 		if(DEBUG == 1) {
@@ -674,9 +696,10 @@ namespace ZenTGI_4 {
 			return AO;
 		}
 		
-		float dither = (GRnoise3(vpos.xy) - 0.5) * exp2(-8);
+		float3 ambient = 0.5 + 0.5 * AMBIENT_COL*AMBIENT_COL;
+		c *= AMBIENT_LEVEL * (ambient / GetLuminance(ambient)) / (1.0 + 0.01 * AMBIENT_LEVEL * c);
 		
-		return dither + ReinJ(
+		return ReinJ(
 			lerp(1.0, AO, AO_INTENSITY) * c +
 			INTENSITY * alb * AO * GI,
 		 HDR);
