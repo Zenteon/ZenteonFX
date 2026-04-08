@@ -68,7 +68,7 @@ uniform float AMBIENT_LEVEL <
 	ui_label = "Light Level";
 	ui_category = "\n Enviroment \n\n";
 	ui_category_closed = true;
-> = 1.5;
+> = 1.0;
 
 uniform float3 AMBIENT_COL <
 	ui_min = 0.1;
@@ -77,7 +77,7 @@ uniform float3 AMBIENT_COL <
 	ui_label = "Light Color";
 	ui_category = "\n Enviroment \n\n";
 	ui_category_closed = true;
-> = float3(0.8,0.9,1.0);
+> = float3(0.95,0.95,1.0);
 
 uniform float FADEOUT <
 	ui_type = "drag";
