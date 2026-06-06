@@ -22,7 +22,8 @@
 */
 
 
-#define NRES (512 * int2(DIV_RND_UP(RES.x, 512), DIV_RND_UP(RES.y, 1024)))
+#define NRES RES
+#define DISPATCH_NRES(X, Y, DIS_RES_DIV) DispatchSizeX = DIV_RND_UP(NRES.x, X * DIS_RES_DIV); DispatchSizeY = DIV_RND_UP(NRES.y, Y * DIS_RES_DIV)
 //(512 * int2(DIV_RND_UP(RES.x, 512), DIV_RND_UP(RES.y, 512)))
 //float2(2048,1024)
 	
@@ -37,7 +38,7 @@ uniform float C0_M <
 	ui_label = "C0 Multiplier";
 	ui_min = 0.1;
 	ui_max = 20.0;
-	hidden = 1;
+	//hidden = 1;
 > = 1.0;
 
 uniform float INTENSITY <
@@ -58,18 +59,23 @@ uniform float THICKNESS <
 	ui_type = "drag";
 	ui_label = "Z thickness";
 	ui_min = 0.1;
-	ui_max = 10.0;
-	hidden = 1;
-> = 0.5;
+	ui_max = 2.0;
+	//hidden = 1;
+> = 0.8;
 
 uniform float THICK_SCALE <
 	ui_type = "drag";
 	ui_label = "Thickness Z Scale";
-	ui_min = 0.1;
+	ui_min = 0.01;
 	ui_max = 1.0;
 	hidden = 1;
-> = 0.25;
-	
+> = 0.025;
+
+uniform bool GATHER_CM1 <
+	ui_label = "Gather C-1";
+	hidden=true;
+> = 0;
+
 uniform bool SHOW_WEIGHTS <
 	ui_label = "Debug";
 > = 0;
@@ -78,6 +84,8 @@ uniform bool SHOW_WEIGHTS <
 
 #define C_FILTER LINEAR
 
+texture2D tFullSHLum { DIVRES(1); Format = RGBA16F; };
+sampler2D sFullSHLum { Texture = tFullSHLum; };
 
 namespace ZenAO {
 	
@@ -117,32 +125,46 @@ namespace ZenAO {
 	
 	texture2D tHIZ0 { DIVRES_N(1, NRES); Format = RG16; };
 	sampler2D sHIZ0 { Texture = tHIZ0; };
+	sampler2D sHIZ0g { Texture = tHIZ0; FILTER(POINT); };
+	storage2D cHIZ0 { Texture = tHIZ0; };
 	
 	texture2D tHIZ1 { DIVRES_N(2, NRES); Format = RG16; };
 	sampler2D sHIZ1 { Texture = tHIZ1; };
+	storage2D cHIZ1 { Texture = tHIZ1; };
 	
 	texture2D tHIZ2 { DIVRES_N(4, NRES); Format = RG16; };
 	sampler2D sHIZ2 { Texture = tHIZ2; };
+	sampler2D sHIZ2p { Texture = tHIZ2; FILTER(POINT); };
+	storage2D cHIZ2 { Texture = tHIZ2; };
 	
 	texture2D tHIZ3 { DIVRES_N(8, NRES); Format = RG16; };
 	sampler2D sHIZ3 { Texture = tHIZ3; };
+	storage2D cHIZ3 { Texture = tHIZ3; };
 	
 	texture2D tHIZ4 { DIVRES_N(16, NRES); Format = RG16; };
 	sampler2D sHIZ4 { Texture = tHIZ4; };
+	storage2D cHIZ4 { Texture = tHIZ4; };
 	
 	texture2D tHIZ5 { DIVRES_N(32, NRES); Format = RG16; };
 	sampler2D sHIZ5 { Texture = tHIZ5; };
+	storage2D cHIZ5 { Texture = tHIZ5; };
 	
 	texture2D tHIZ6 { DIVRES_N(64, NRES); Format = RG16; };
 	sampler2D sHIZ6 { Texture = tHIZ6; };
+	storage2D cHIZ6 { Texture = tHIZ6; };
 	
 	texture2D tHIZ7 { DIVRES_N(128, NRES); Format = RG16; };
 	sampler2D sHIZ7 { Texture = tHIZ7; };
+	storage2D cHIZ7 { Texture = tHIZ7; };
+	
+	texture2D tTraceDepth { DIVRES_N(4, NRES); Format = R16; };
+	sampler2D sTraceDepth { Texture = tTraceDepth; FILTER(POINT); };
 	
 	//=======================================================================================
 	//Functions
 	//=======================================================================================
 	
+	//https://web.archive.org/web/20180927181721/http://www.java-gaming.org/index.php?topic=35123.0
 	float4 tex2DBicubic(sampler2D tex, float2 xy)
 	{
 		float mip = 0.0;
@@ -202,6 +224,7 @@ namespace ZenAO {
 	{
 		float2 s = tex2Dsize(tex);
 		return tex2DBicubic(tex, vpos / s);//tex2D(tex, vpos / s);
+		//return tex2Dfetch(tex, vpos);
 	}
 	
 	float Bayer(uint2 p, uint level) //Thanks Marty
@@ -320,21 +343,94 @@ namespace ZenAO {
 	}
 	*/
 	
+	float2 GetM(float2 xy)
+	{
+		float cen = 0.5 * (xy.x + xy.y);
+		return float2(cen, cen*cen);
+	}
 	
 	float2 HiZL(sampler2D texD, float2 pos, float level)
 	{
+		
 	    float2 ts = tex2Dsize(texD);         
-	    float2 d = float2(1.0, 0.0);          
+	    //float2 d = float2(1.0, 0.0);          
 	    float2 base = 2.0 * pos - 1.0;
 	
-	    #define C(c) clamp(c, 0.0, ts - 1.0)
+	    #define CLP(c) clamp(c, 0.0, ts - 1.0)
 
-	    d = minax(d, tex2Dfetch(texD, C(base + float2(0, 0))).xy);
-	    d = minax(d, tex2Dfetch(texD, C(base + float2(1, 0))).xy);
-	    d = minax(d, tex2Dfetch(texD, C(base + float2(0, 1))).xy);
-	    d = minax(d, tex2Dfetch(texD, C(base + float2(1, 1))).xy);
+	    //d = minax(d, tex2Dfetch(texD, C(base + float2(0, 0))).xy);
+	    //d = minax(d, tex2Dfetch(texD, C(base + float2(1, 0))).xy);
+	    //d = minax(d, tex2Dfetch(texD, C(base + float2(0, 1))).xy);
+	    //d = minax(d, tex2Dfetch(texD, C(base + float2(1, 1))).xy);
 	
-	    return d;
+		/*
+		float2 a = tex2Dfetch(texD, C(base + float2(0, 0))).xy;
+		float2 b = tex2Dfetch(texD, C(base + float2(1, 0))).xy;
+	    float2 c = tex2Dfetch(texD, C(base + float2(0, 1))).xy;
+	    float2 d = tex2Dfetch(texD, C(base + float2(1, 1))).xy;
+	    
+	    float2 mean = 0.25 * (a+b+c+d);
+	    
+	    float2 m = 0, M = 0;
+	    
+	    m += a.x <= mean.x ? float2(a.x,1) : 0.0;
+	    m += b.x <= mean.x ? float2(b.x,1) : 0.0;
+	    m += c.x <= mean.x ? float2(c.x,1) : 0.0;
+	    m += d.x <= mean.x ? float2(d.x,1) : 0.0;
+	    
+	    M += a.y >= mean.y ? float2(a.y,1) : 0.0;
+	    M += b.y >= mean.y ? float2(b.y,1) : 0.0;
+	    M += c.y >= mean.y ? float2(c.y,1) : 0.0;
+	    M += d.y >= mean.y ? float2(d.y,1) : 0.0;
+	    
+	    return float2(m.x,M.x) / float2(m.y,M.y);
+	    */
+	    
+	    float2 m = 0, M = 0;
+	    float2 samps[16];
+	    float2 mean = 0.0;
+	    int index = 0;
+	    
+	    for(int i = -1; i < 3; i++) for(int j = -1; j < 3; j++)
+	    {
+	    	float2 np = base + float2(i,j);
+	    	
+	    	float2 samp = tex2Dfetch(texD, CLP(base + float2(i, j))).xy;
+	    	
+	    	float2 o = float2(i,j)-0.5;
+	    	
+	    	mean += samp;
+	    	samps[index] = samp.xy;
+	    	index++;
+	    }
+	    
+	    float2 minMax = float2(1.0,0.0);
+	    
+	    mean /= index;//16.0;
+	    float m2 = dot(mean,0.5);
+	    
+	    for(int i = 0; i < 16; i++)
+	    {
+	    	float2 samp = samps[i];
+	    	
+	    	m += samp.x <= mean.x ? float2(samp.x,1.0) : 0.0;
+	    	M += samp.y >= mean.y ? float2(samp.y,1.0) : 0.0;
+	    	
+	    	m += samp.y < mean.x ? float2(samp.y,1.0) : 0.0;
+	    	M += samp.x > mean.y ? float2(samp.x,1.0) : 0.0;
+	    	
+	    	
+	    	minMax.x = min(minMax.x, samp.x);
+	    	minMax.y = max(minMax.y, samp.y);
+	    }
+	    
+	    m = m.y > 0.0 ? m : float2(minMax.x, 1.0);
+	    M = M.y > 0.0 ? M : float2(minMax.y, 1.0);
+	    
+	    return float2(m.x/m.y,M.x/M.y);
+	    
+	    //return d;
+	   
 	}
 	
 	
@@ -346,7 +442,8 @@ namespace ZenAO {
 		float a = GetDepth(xy);
 		float b = GetDepth( (floor(xy*RES) + float2(0.5,1.5) ) / RES );
 		//min( min(d.x,d.y), min(d.z,d.w) );//
-		return min( min(d.x,d.y), min(d.z,d.w) );//;//min( min(d.x,d.y), min(d.z,d.w) );//;//float2(min(d.x, min(d.y, min(d.z, d.w))),  max(d.x, max(d.y, min(d.z, d.w))) );
+		return min( min(d.x,d.y), min(d.z,d.w) );//;//min( min(d.x,d.y), min(d.z,d.w) );//;//
+		//return float2(min(d.x, min(d.y, min(d.z, d.w))),  max(d.x, max(d.y, min(d.z, d.w))) );
 	}
 	
 	
@@ -385,6 +482,35 @@ namespace ZenAO {
 	{
 		return HiZL(sHIZ6, vpos.xy, 6.0);
 	}	
+	
+	
+	float DepthDSPS(PS_INPUTS) : SV_Target//CS_INPUTS)
+	{
+		uint2 id = floor(vpos.xy);
+		float2 uv = 4.0 * id.xy / RES;//floored uv, apply offsets later
+		
+		bool doMin = ((id.x + id.y) % 2) == 0;
+		
+		float4 A = GatherLinDepth(uv);
+		float4 B = GatherLinDepth(uv + float2(0.0, 2.0) / RES);
+		float4 C = GatherLinDepth(uv + float2(2.0, 0.0) / RES);
+		float4 D = GatherLinDepth(uv + float2(2.0, 2.0) / RES);
+		
+		float mean = dot(float4(dot(A,0.25), dot(B,0.25), dot(C,0.25), dot(D,0.25)), 0.25);
+		
+		float depths[16] = { A.x, A.y, A.z, A.w, B.x, B.y, B.z, B.w, C.x, C.y, C.z, C.w, D.x, D.y, D.z, D.w };
+		
+		
+		float outDepth = 0.0;
+		for(int i = 0; i < 16; i++)
+		{
+			float smp = depths[i];
+			outDepth = abs(smp - mean) < abs(outDepth - mean) ? smp : outDepth;
+		}
+		return outDepth;
+		//float4 E = float4(MinMaxC(A, doMin), MinMaxC(B, doMin), MinMaxC(C, doMin), MinMaxC(D, doMin));
+		//return MinMaxC(E, doMin);
+	}
 		
 	//=======================================================================================
 	//AO
@@ -410,15 +536,15 @@ namespace ZenAO {
 	{
 		float exl = exp2(level);
 		float ext = exp2(LEVELS);
-		float exlp = max(0,exp2(level - 1.0));
+		float exlp = max(0, exp2(level - 1.0));
 		
 		vec *= 1.41421356 * float2(1.0, NRES.x / NRES.y);
 		
-		float2 no = exl * 1.0 * vec * rcp(NRES);
+		float2 no = exl * 2.4 * vec * rcp(NRES);
 		
    	 for(int i = 0; i < STEPS; i++)
    	 {
-   	 	float o = (exlp + (exl - 1.0) * (float(i) / STEPS) ) / (ext);
+   	 	float o = (exlp + (exl - 1.0) * (float(i) / (STEPS) ) ) / (ext);
    	 	
    	 	
    	 	float2 nxy = xy + no + 1.0 * C0_M*vec * o;
@@ -426,16 +552,16 @@ namespace ZenAO {
    	 	float2 rg = saturate(nxy.xy * nxy.xy - nxy.xy);
 			if(rg.x != -rg.y) break;
    	 	
-   	 	float2 samD = tex2Dlod(sHIZ2, float4(nxy,0,0) ).xy;//GetDepth(nxy);// 
-   	 	;
-   	 	float3 samPos = GetEyePos(nxy, samD.y);
+   	 	float2 samD = tex2Dlod(sTraceDepth, float4(nxy,0,0) ).xy;//GetDepth(nxy);// 
+   	 	
+   	 	float3 samPos = GetEyePos(nxy, samD.x);
    	 	
    	 	float3 tvMin = samPos - minPos;
    	 	float3 tvMax = samPos - maxPos;
 
    	 	float4 minmax = float4(
-				FastAcos2(float2(dotnv(tvMin, viewV), dotnv( THICKNESS * normalize(samPos) + (1.0 + 0.1 * THICK_SCALE) * samPos - minPos, viewV) )),
-   	 		FastAcos2(float2(dotnv(tvMax, viewV), dotnv( THICKNESS * normalize(samPos) + (1.0 + 0.1 * THICK_SCALE) * samPos - maxPos, viewV) )) );
+				FastAcos2(float2(dotnv(tvMin, viewV), dotnv( (1.0 + THICK_SCALE) * samPos - minPos - viewV * THICKNESS, viewV) )),
+   	 		FastAcos2(float2(dotnv(tvMax, viewV), dotnv( (1.0 + THICK_SCALE) * samPos - maxPos - viewV * THICKNESS, viewV) )) );
    	 	minmax = saturate(minmax / 3.14159);
    	 	
    	 	minmax.xy = minmax.x > minmax.y ? minmax.yx : minmax.xy;
@@ -467,15 +593,16 @@ namespace ZenAO {
 			if(rg.x != -rg.y) break;
    	 	
    	 	float samD = GetDepth(nxy);// + 1e-4;//tex2Dlod(sHIZ2, float4(nxy,0,0) ).xy;//
+   	 	
    	 	float3 samPos = GetEyePos(nxy, samD.x);
    	 	
    	 	float3 tv = samPos - verPos;
 
-   	 	float2 minmax = FastAcos2(float2(dotnv(tv, viewV), dotnv( THICKNESS * normalize(samPos) + (1.0 + 0.1 * THICK_SCALE) * samPos - verPos, viewV) ));
+   	 	float2 minmax = FastAcos2(float2(dotnv(tv, viewV), dotnv((1.0 + THICK_SCALE) * samPos - verPos - viewV * THICKNESS, viewV) ));
    	 	minmax = saturate(minmax / 3.14159);
    	 	
    	 	minmax.xy = minmax.x > minmax.y ? minmax.yx : minmax.xy;
-   	 	int2 ab = clamp(ceil(32.0 * float2(minmax.x, minmax.y - minmax.x)), 0, 32);
+   	 	int2 ab = clamp(floor(32.0 * float2(minmax.x, minmax.y - minmax.x)), 0, 32);
    	 	BITFIELD |= ((1 << ab.y) - 1) << ab.x;
    	 }
    	 
@@ -526,6 +653,7 @@ namespace ZenAO {
 		return float3(luv, frac(-0.125 + id));
 	}	
 	
+	
 	mmprobe MergeCascade(sampler2D tex_m, sampler2D tex_M, sampler2D tex_d, sampler2D tex_hd, float2 pos, float2 xy, float level)
 	{
 		float exl = exp2(level);
@@ -539,18 +667,19 @@ namespace ZenAO {
 		float fx = xy.x - qx;
 		
 		float4 minP = 0.5 * (
-			tex2D(tex_m, float2( qx + 0.5 * fx, xy.y) ) +
-			tex2D(tex_m, float2( qx + 0.5 * fx + 0.125 / exl, xy.y) ) );
+			tex2DBicubic(tex_m, float2( qx + 0.5 * fx, xy.y) ) +
+			tex2DBicubic(tex_m, float2( qx + 0.5 * fx + 0.125 / exl, xy.y) ) );
 		
 		float4 maxP = 0.5 * (
-			tex2D(tex_M, float2( qx + 0.5 * fx, xy.y) ) +
-			tex2D(tex_M, float2( qx + 0.5 * fx + 0.125 / exl, xy.y) ) );
+			tex2DBicubic(tex_M, float2( qx + 0.5 * fx, xy.y) ) +
+			tex2DBicubic(tex_M, float2( qx + 0.5 * fx + 0.125 / exl, xy.y) ) );
 		//tex2DBicubic
 		float2 d = tex2D(tex_d, float4(luv,0,0).xy ).xy;
 		float2 hd = tex2D(tex_hd, float4(luv,0,0).xy ).xy;//High res depth
 		
 		float2 lval = saturate((hd - d.x) / (d.y - d.x + 1e-10));
-		//lval = smoothstep(0,1,lval);
+		//dlval = smoothstep(0,1,lval);
+		//lval = round(lval);
 		
 		mmprobe o;
 		o.min = lerp(minP, maxP, lval.x);
@@ -733,15 +862,15 @@ namespace ZenAO {
 		float4 Cm1_2 = GatherMinus1(xy, verPos, -viewV, float2( 1,-1) * 0.707106781, 2);
 		float4 Cm1_3 = GatherMinus1(xy, verPos, -viewV, float2(-1,-1) * 0.707106781, 2);
 		
-		float4 AO_m0 = Cm1_0 * tex2DfetchBic(sAOMin0, 0.25 * vpos.xy + float2(0.0 * 0.25 * NRES.x, 0.0) ); 
-		float4 AO_m1 = Cm1_1 * tex2DfetchBic(sAOMin0, 0.25 * vpos.xy + float2(1.0 * 0.25 * NRES.x, 0.0) ); 
-		float4 AO_m2 = Cm1_2 * tex2DfetchBic(sAOMin0, 0.25 * vpos.xy + float2(2.0 * 0.25 * NRES.x, 0.0) ); 
-		float4 AO_m3 = Cm1_3 * tex2DfetchBic(sAOMin0, 0.25 * vpos.xy + float2(3.0 * 0.25 * NRES.x, 0.0) ); 
+		float4 AO_m0 = Cm1_0 * tex2DfetchLin(sAOMin0, 0.25 * vpos.xy + float2(0.0 * 0.25 * NRES.x, 0.0) ); 
+		float4 AO_m1 = Cm1_1 * tex2DfetchLin(sAOMin0, 0.25 * vpos.xy + float2(1.0 * 0.25 * NRES.x, 0.0) ); 
+		float4 AO_m2 = Cm1_2 * tex2DfetchLin(sAOMin0, 0.25 * vpos.xy + float2(2.0 * 0.25 * NRES.x, 0.0) ); 
+		float4 AO_m3 = Cm1_3 * tex2DfetchLin(sAOMin0, 0.25 * vpos.xy + float2(3.0 * 0.25 * NRES.x, 0.0) ); 
 		
-		float4 AO_M0 = Cm1_0 * tex2DfetchBic(sAOMax0, 0.25 * vpos.xy + float2(0.0 * 0.25 * NRES.x, 0.0) ); 
-		float4 AO_M1 = Cm1_1 * tex2DfetchBic(sAOMax0, 0.25 * vpos.xy + float2(1.0 * 0.25 * NRES.x, 0.0) ); 
-		float4 AO_M2 = Cm1_2 * tex2DfetchBic(sAOMax0, 0.25 * vpos.xy + float2(2.0 * 0.25 * NRES.x, 0.0) ); 
-		float4 AO_M3 = Cm1_3 * tex2DfetchBic(sAOMax0, 0.25 * vpos.xy + float2(3.0 * 0.25 * NRES.x, 0.0) ); 
+		float4 AO_M0 = Cm1_0 * tex2DfetchLin(sAOMax0, 0.25 * vpos.xy + float2(0.0 * 0.25 * NRES.x, 0.0) ); 
+		float4 AO_M1 = Cm1_1 * tex2DfetchLin(sAOMax0, 0.25 * vpos.xy + float2(1.0 * 0.25 * NRES.x, 0.0) ); 
+		float4 AO_M2 = Cm1_2 * tex2DfetchLin(sAOMax0, 0.25 * vpos.xy + float2(2.0 * 0.25 * NRES.x, 0.0) ); 
+		float4 AO_M3 = Cm1_3 * tex2DfetchLin(sAOMax0, 0.25 * vpos.xy + float2(3.0 * 0.25 * NRES.x, 0.0) ); 
 		
 		float AO_m = 0.0;
 		AO_m += AO_m0.x * saturate( dot( float3(-1, 1, 1) * v0, normal ) + NBIAS );
@@ -801,14 +930,115 @@ namespace ZenAO {
 		//return 0.25 * lerp(nm, nM, saturate(lval) ).xyz;//
 		if(!SHOW_WEIGHTS) return ReinJ((0.01+0.99*AO) * i, HDR);		
 		return AO;//pow(AO, rcp(2.2));
+	
+		/*
+		float3 normal = CalcNormalsOrthographic(xy);
+
+		#define NBIAS 0.0
+		vpos.xy = xy * NRES;
 		
+		float3 verPos = NorEyePos(xy);
+		float3 viewV = normalize(verPos);
+		
+		float3 k = cross(viewV, float3(0,0,1)); 
+		float c = dot(viewV, float3(0,0,1));    
+		float s = length(k);
+		
+		// force normal orthographic
+		float3 normalOrtho = length(normal) * normalize(normal * c + cross(k, normal) * s + k * dot(k, normal) * (1.0 - c));
+		
+		float3 v0 = normalize(float3(0.6124, 0.6124,-(0.75)));
+		float3 v1 = normalize(float3(0.6124, 0.6124,-(0.25)));
+		float3 v2 = normalize(float3(0.6124, 0.6124, (0.25)));
+		float3 v3 = normalize(float3(0.6124, 0.6124, (0.75)));
+		
+		float4 Cm1_0 = 1.0, Cm1_1 = 1.0, Cm1_2 = 1.0, Cm1_3 = 1.0;
+		
+		if(GATHER_CM1)
+		{
+		    Cm1_0 = GatherMinus1(xy, verPos, -viewV, float2(-1, 1) * 0.707106781, 2);
+		    Cm1_1 = GatherMinus1(xy, verPos, -viewV, float2( 1, 1) * 0.707106781, 2);
+		    Cm1_2 = GatherMinus1(xy, verPos, -viewV, float2( 1,-1) * 0.707106781, 2);
+		    Cm1_3 = GatherMinus1(xy, verPos, -viewV, float2(-1,-1) * 0.707106781, 2);
+		}
+		
+		float4 AO_m0 = Cm1_0 * tex2DfetchLin(sAOMin0, 0.25 * vpos.xy + float2(0.0 * 0.25 * NRES.x, 0.0));
+		float4 AO_m1 = Cm1_1 * tex2DfetchLin(sAOMin0, 0.25 * vpos.xy + float2(1.0 * 0.25 * NRES.x, 0.0));
+		float4 AO_m2 = Cm1_2 * tex2DfetchLin(sAOMin0, 0.25 * vpos.xy + float2(2.0 * 0.25 * NRES.x, 0.0));
+		float4 AO_m3 = Cm1_3 * tex2DfetchLin(sAOMin0, 0.25 * vpos.xy + float2(3.0 * 0.25 * NRES.x, 0.0));
+		
+		float4 AO_M0 = Cm1_0 * tex2DfetchLin(sAOMax0, 0.25 * vpos.xy + float2(0.0 * 0.25 * NRES.x, 0.0));
+		float4 AO_M1 = Cm1_1 * tex2DfetchLin(sAOMax0, 0.25 * vpos.xy + float2(1.0 * 0.25 * NRES.x, 0.0));
+		float4 AO_M2 = Cm1_2 * tex2DfetchLin(sAOMax0, 0.25 * vpos.xy + float2(2.0 * 0.25 * NRES.x, 0.0));
+		float4 AO_M3 = Cm1_3 * tex2DfetchLin(sAOMax0, 0.25 * vpos.xy + float2(3.0 * 0.25 * NRES.x, 0.0));
+		
+	
+		float4 sh_m = 0;
+		float4 sh_M = 0;
+		
+		[unroll]
+		for(int q = 0; q < 4; q++)
+		{
+		    float3 sign = float3(q == 0 ? -1 : q == 3 ? -1 : 1,
+		                         q < 2  ?  1 :            -1, 1);
+		
+		    float4 ao_m = q == 0 ? AO_m0 : q == 1 ? AO_m1 : q == 2 ? AO_m2 : AO_m3;
+		    float4 ao_M = q == 0 ? AO_M0 : q == 1 ? AO_M1 : q == 2 ? AO_M2 : AO_M3;
+		
+		    float3 d0 = sign * v0, d1 = sign * v1, d2 = sign * v2, d3 = sign * v3;
+		
+		    sh_m += ao_m.x * float4(1, d0);
+		    sh_m += ao_m.y * float4(1, d1);
+		    sh_m += ao_m.z * float4(1, d2);
+		    sh_m += ao_m.w * float4(1, d3);
+		
+		    sh_M += ao_M.x * float4(1, d0);
+		    sh_M += ao_M.y * float4(1, d1);
+		    sh_M += ao_M.z * float4(1, d2);
+		    sh_M += ao_M.w * float4(1, d3);
+		}
+		
+		sh_m *= 0.0625;
+		sh_M *= 0.0625;
+
+		float d    = GetDepth(xy);
+		float2 nd  = tex2D(sHIZ2, xy).xy;
+		float lval = (d - nd.x) / (nd.y - nd.x + 1e-10);
+		
+		float4 sh = lerp(sh_m, sh_M, saturate(lval));
+		
+		//rotate back
+		sh.yzw = sh.yzw * c - cross(k, sh.yzw) * s + k * dot(k, sh.yzw) * (1.0 - c);
+		
+		//sh = lerp(float4(1.0,0.0.xxx), sh, INTENSITY * exp(-4.0 * (1.0 - FADEOUT) * d));
+		
+		float3 i = IReinJ(GetBackBuffer(xy), HDR);
+		
+		
+		float outAO = 1.75 * dot(sh, float4(1.0, normal));
+		
+		float4 irrSH = tex2D(sFullSHLum, xy);
+		//outAO = exp2(irrSH.x + dot(normalize(sh.x*normal + 2.0*sh.yzw), irrSH.yzw));
+		//outAO /= exp2(irrSH.x + dot(normal, irrSH.yzw));
+		
+		//outAO *= dot(float4(1.0, normal), sh);
+		
+		
+		outAO = lerp(1.0, outAO, INTENSITY * exp(-4.0 * (1.0 - FADEOUT) * d));
+		
+		
+		if(!SHOW_WEIGHTS) return ReinJ((0.01 + 0.99 * outAO) * i, HDR);
+		outAO = ReinJ(outAO, HDR).x;
+		return outAO;//0.5 - 0.5 * normalize(sh.yzw);//outAO;
+		*/
 	}
 
 	
-	technique ZenSharpen <
-		ui_label = "BETA Zenteon: RCAO";
+	technique ZenRCAO <
+		ui_label = "BETA - Zenteon: RCAO";
 		>	
 	{
+		pass {	PASS1(DepthDSPS, tTraceDepth); }
 		pass {	PASS1(HZ0PS, tHIZ0); }
 		pass {	PASS1(HZ1PS, tHIZ1); }
 		pass {	PASS1(HZ2PS, tHIZ2); }
@@ -817,6 +1047,9 @@ namespace ZenAO {
 		pass {	PASS1(HZ5PS, tHIZ5); }
 		pass {	PASS1(HZ6PS, tHIZ6); }
 		pass {	PASS1(HZ7PS, tHIZ7); }
+		
+		
+		//pass {	DISPATCH_NRES(32,32, 1); ComputeShader = DownSampleDepthSP<32,32>; }
 		
 		pass {	PASS2(Cascade5PS, tAOMin5, tAOMax5); }
 		pass {	PASS2(Cascade4PS, tAOMin4, tAOMax4); }
