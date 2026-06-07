@@ -1,6 +1,6 @@
 //========================================================================
 /*
-	Copyright © Daniel Oren-Ibarra - 2025
+	Copyright © Daniel Oren-Ibarra - 2026
 	All Rights Reserved.
 
 	THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND
