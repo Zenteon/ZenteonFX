@@ -1,6 +1,6 @@
 //========================================================================
 /*
-	Copyright © Daniel Oren-Ibarra - 2025
+	Copyright © Daniel Oren-Ibarra - 2026
 	All Rights Reserved.
 
 	THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND
@@ -13,7 +13,7 @@
 	
 	
 	======================================================================	
-	Zenteon: ATA v0.3 - Authored by Daniel Oren-Ibarra "Zenteon"
+	Zenteon: ATA - Authored by Daniel Oren-Ibarra "Zenteon"
 	
 	Discord: https://discord.gg/PpbcqJJs6h
 	Patreon: https://patreon.com/Zenteon
@@ -84,7 +84,7 @@ uniform float TAA_LERP_VALUE <
 	ui_label = "Accumulation value";
 	ui_tooltip = "How much of the previous frames are blended, higher values will give a more stable but less responsive image";
 	ui_type = "slider";
-> = 0.85;
+> = 0.9;
 
 
 texture2D texMotionVectors { DIVRES(1); Format = RG16F; };
@@ -150,33 +150,64 @@ namespace ZenATA {
 	}
 	
 	
-	float Lanczos(float x)
+	//adapted from https://research.activision.com/publications/archives/filmic-smaasharp-morphological-and-temporal-antialiasing
+	float4 FastLanczos(sampler2D samp, float2 uv, float4 texSizeInv)
 	{
-		float p = 3.14159*abs(x);
-		return (sin(p)/p) * (sin(0.25*p)/(0.25*p));
-	}
+		// texSizeInv = float4(rcp(texSize), texSize);
 	
-	float4 tex2DLanczos(sampler2D tex, float2 xy)
-	{
-		float2 pos = tex2Dsize(tex) * xy;
-		float4 I = float4(tex2Dfetch(tex, pos).rgb, 1.0);
-		
-		float4 acc;
-		for(int i = -2; i < 2; i++) for(int j = -2; j < 2; j++)
-		{
-			float2 np = pos + (float2(i,j)+0.5);
-			float ld = length( 2.6 * (float2(i,j)+0.5) );
-			float3 s = tex2Dfetch(tex, np).rgb;
-			
-			acc += Lanczos(ld) * float4(pow(s,2.2), 1.0);
-		}
-		return float4( pow(acc.rgb / acc.w, rcp(2.2) ), 1.0 );
-	}	
+	    float2 position = texSizeInv.zw * uv;
+	    float2 centerPos = floor(position - 0.5) + 0.5;
+	    float2 f = position - centerPos;
+	    
+	    float2 w0 = f*(f*(-0.7111*f + 1.3221) - 0.6120) - 0.0010;
+	    float2 w1 = f*(f*( 1.5116*f - 2.5604) + 0.0508) + 0.9998;
+	    f = 1.0 - f;
+	    float2 w2 = f*(f*( 1.5116*f - 2.5604) + 0.0508) + 0.9998;
+	    float2 w3 = f*(f*(-0.7111*f + 1.3221) - 0.6120) - 0.0010;
+	    
+	    float2 w12 = w1 + w2;
+	    float2 tc12 = texSizeInv.xy * (centerPos + w2 / w12);
+	    float4 centerColor = tex2Dlod(samp, float4(tc12.x, tc12.y, 0,0));
+	    
+	    float2 tc0 = texSizeInv.xy * (centerPos - 1.0);
+	    float2 tc3 = texSizeInv.xy * (centerPos + 2.0);
+	    float4 color = tex2Dlod(samp, float4(tc12.x, tc0.y,  0,0)) * (w12.x * w0.y ) +
+	                   tex2Dlod(samp, float4(tc0.x,  tc12.y, 0,0)) * (w0.x  * w12.y) +
+	                   centerColor                      		   * (w12.x * w12.y) +
+	                   tex2Dlod(samp, float4(tc3.x,  tc12.y, 0,0)) * (w3.x  * w12.y) +
+	                   tex2Dlod(samp, float4(tc12.x, tc3.y,  0,0)) * (w12.x * w3.y );
+	    return color * rcp(w12.x*w0.y + w0.x*w12.y + w12.x*w12.y + w3.x*w12.y + w12.x*w3.y);
+	}
+
 	
 	//=======================================================================================
 	//Passes
 	//=======================================================================================
-
+	
+	float4 RGBtoNCM(float3 c)
+	{
+		float M = dot(c, float3(0.299, 0.587, 0.114)) + 1e-4;//max(c.r,max(c.g,c.b));
+		return float4(c * rcp(M) , M);
+	}
+	
+	float3 NCMtoRGB(float4 n)
+	{
+		return n.w * n.xyz; 
+	}
+	
+	#define INCM_ORIGIN 16.0
+	
+	float4 RGBtoINCM(float3 c)
+	{
+		c = INCM_ORIGIN - c;
+		float M = dot(c, float3(0.299, 0.587, 0.114)) + 1e-4;
+		return float4(c * rcp(M), M);
+	}
+	
+	float3 INCMtoRGB(float4 n)
+	{
+		return INCM_ORIGIN - n.w * n.xyz; 
+	}
 	
 	float4 CurPS(PS_INPUTS) : SV_Target
 	{	
@@ -230,8 +261,8 @@ namespace ZenATA {
 		}
 		[branch]
 		switch(ACC_MODE) {
-			case 0: return tex2D(sPre, xy + MVi/RES);
-			case 1: return tex2D(sPre, xy + MVi/RES);//float4(acc.rgb / acc.w, 1.0);
+			case 0: return FastLanczos(sPre, xy + MVi/RES, float4(rcp(RES), RES) );
+			case 1: return FastLanczos(sPre, xy + MVi/RES, float4(rcp(RES), RES) );
 			case 2: return float4(acn.rgb / acn.w, 1.0);
 		}
 		return 0;
@@ -240,7 +271,6 @@ namespace ZenATA {
 	float4 PrePS(PS_INPUTS) : SV_Target
 	{	 
 		float4 pre = tex2D(sCur, xy);
-		
 		float4 cur = float4(GetBackBuffer(xy), 1.0);
 		cur.a = dot(cur.rgb*cur.rgb, float3(0.2126,0.7152,0.0722));
 		
@@ -258,16 +288,52 @@ namespace ZenATA {
 		float2 range = saturate(txy * txy - txy);
 		MV.z *= range.x == -range.y;
 		
-		float3 minC = 1.0, maxC = 0.0;
+		
+		float4  m1 = 0.0;
+		float4  m2 = 0.0;
+		float4 im1 = 0.0;
+		float4 im2 = 0.0;
+		float  accw = 0.0;
 		
 		for(int i = 0; i < 9; i++)
 		{
-			float2 ni = vpos.xy + (float2( floor(i / 3.0), i % 3 ) - 1.0) * RESD;
+			float2 ioff = float2( floor(i / 3.0), i % 3 ) - 1.0;
+			float2 ni = vpos.xy + ioff * RESD;
 			float3 t = tex2Dfetch(ReShade::BackBuffer, ni/RESD).rgb;
-			minC = min(minC, t);
-			maxC = max(maxC, t);
+			
+			float  w  = rcp( (1.0 + abs(ioff.x)) * (1.0 + abs(ioff.y)) );
+			float4 N  = RGBtoNCM(t);
+			float4 iN = RGBtoINCM(t);
+			
+			m1  += w * N;
+			m2  += w * N*N;
+			im1 += w * iN;
+			im2 += w * iN*iN;
+			
+			accw += w;
+			
 		}
-		if(DO_NEIGHBORHOOD) pre.rgb = clamp(pre.rgb, minC, maxC);
+		m1  /= accw;
+		m2  /= accw;
+		im1 /= accw;
+		im2 /= accw;
+		
+		float4 nPre = RGBtoNCM(pre.rgb);
+		float4 cPre = nPre;
+		
+		float4 std = sqrt( abs(m2 - m1*m1) );
+		nPre = clamp(nPre, m1 - std, m1 + std);
+		
+		//Inverted cone
+		nPre = RGBtoINCM(NCMtoRGB(nPre));
+		std = sqrt( abs(im2 - im1*im1) );
+		nPre = clamp(nPre, im1 - std, im1 + std);
+		
+		pre.rgb = INCMtoRGB(nPre);
+		float3 blur = NCMtoRGB(m1);
+		
+		cur.rgb = lerp(blur, cur.rgb, MV.z);
+		//if(DO_NEIGHBORHOOD) pre.rgb = clamp(pre.rgb, minC, maxC);
 		
 		return lerp(cur, pre, MV.z * TAA_LERP_VALUE);
 	}
@@ -291,6 +357,7 @@ namespace ZenATA {
 		float3 pD = tex2D(sPre,xy + hp*float2(-1,-1)).rgb;
 		
 		float lap = dot(p.rgb - 0.25*(pA+pB+pC+pD), float3(0.299,0.587,0.114));
+		lap *= rcp(1.0 + 256.0 * lap*lap);
 		
 		float3 A = GetBackBuffer(xy + hp*float2( 1, 1));
 		float3 B = GetBackBuffer(xy + hp*float2( 1,-1));
@@ -301,13 +368,13 @@ namespace ZenATA {
 		
 		float G = dot(abs(-4.0*c + (A+B+C+D)) / M, float3(0.299,0.587,0.114));
 		float tG = 4.0 * dot(abs(c-p.rgb), float3(0.299,0.587,0.114));
-		//
 		
-		float l = saturate( tG + (ACC_MODE!=1));
-		float l2 = saturate(p.a - dot(p.rgb*p.rgb, float3(0.2126,0.7152,0.0722)) ) / (dot(p.rgb, float3(0.2126,0.7152,0.0722)) + 0.01);
-		l2 = saturate(2.0 * sqrt(l2));
-		//l = l*l*(3.0-2.0*l);
-		l = sqrt(l2);
+		float m2 = p.a;
+		float m1 = dot(p.rgb*p.rgb, float3(0.2126,0.7152,0.0722));
+		float std = 8.0 * sqrt(abs(m2-m1) / (m2 + m1 + 0.1));
+		
+		float l = saturate( std + (ACC_MODE!=1));
+		
 		return lerp(c,p.rgb + (ACC_MODE==1)*lap, l);//saturate(dot(G,));//tex2D(sPre, xy).rgb;//
 	}
 	
